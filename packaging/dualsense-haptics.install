@@ -4,6 +4,9 @@ post_install() {
     echo ">>> Warning: setcap failed - the Bluetooth HID Proxy feature will be unavailable."
   udevadm control --reload-rules 2>/dev/null || true
   udevadm trigger --subsystem-match=misc --sysname-match=uhid 2>/dev/null || true
+  # Re-applies the LED sysfs permission rule to an already-connected
+  # controller too, not just ones plugged in after this install/upgrade.
+  udevadm trigger --subsystem-match=leds 2>/dev/null || true
   echo ">>> To use the Bluetooth HID Proxy (Trigger + Vibration Mix) feature, add yourself"
   echo ">>> to the new group and log out and back in:"
   echo ">>>     sudo usermod -aG dualsense-haptics \$USER"

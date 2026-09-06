@@ -162,6 +162,7 @@ getent group dualsense-haptics >/dev/null || groupadd -r dualsense-haptics
 setcap 'cap_fowner+ep' /usr/lib/dualsense-haptics/dualsense-hidlock
 install -Dm644 "$REPO_DIR/packaging/71-dualsense-haptics-uhid.rules" /usr/lib/udev/rules.d/71-dualsense-haptics-uhid.rules
 udevadm control --reload-rules
+udevadm trigger --subsystem-match=leds
 usermod -aG dualsense-haptics "$USER"
 EOF
                 chmod +x "$PRIV_SCRIPT"

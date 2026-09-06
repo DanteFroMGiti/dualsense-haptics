@@ -219,6 +219,7 @@ sudo setcap 'cap_fowner+ep' /usr/lib/dualsense-haptics/dualsense-hidlock
 sudo install -Dm644 packaging/71-dualsense-haptics-uhid.rules \
     /usr/lib/udev/rules.d/71-dualsense-haptics-uhid.rules
 sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=leds
 ```
 
 ## Steam Deck / SteamOS (Decky Loader plugin)

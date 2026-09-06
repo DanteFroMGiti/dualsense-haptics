@@ -1,1 +1,13 @@
 KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="dualsense-haptics", MODE="0660"
+
+# The DualSense's lightbar and player-indicator LEDs are plain Linux LED
+# class devices (hid-playstation), used by the Immersive Lighting feature
+# via find_led_paths()/write_led_sysfs() whenever the Bluetooth HID Proxy
+# above isn't in the picture (USB, or the Steam Deck plugin) - unlike
+# hidraw/input, nothing grants a regular user write access to their sysfs
+# attribute files by default, so the kernel's own root:root 0644 silently
+# blocks every write (write_led_sysfs() treats that the same as hardware
+# that just doesn't support LEDs, so this fails with no visible error).
+# Reuses the same group as the uhid rule above rather than a second one.
+SUBSYSTEM=="leds", DRIVERS=="playstation", KERNEL=="*:rgb:indicator", RUN+="/usr/bin/chgrp dualsense-haptics /sys%p/brightness /sys%p/multi_intensity", RUN+="/usr/bin/chmod g+w /sys%p/brightness /sys%p/multi_intensity"
+SUBSYSTEM=="leds", DRIVERS=="playstation", KERNEL=="*:white:player-*", RUN+="/usr/bin/chgrp dualsense-haptics /sys%p/brightness", RUN+="/usr/bin/chmod g+w /sys%p/brightness"
