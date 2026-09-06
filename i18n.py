@@ -143,6 +143,10 @@ STRINGS = {
         "trig_param_strength_b": "Strength B", "trig_param_frequency": "Frequency", "trig_param_period": "Period",
         "trig_param_first_foot": "First Beat", "trig_param_second_foot": "Second Beat",
         "trig_param_amplitude": "Amplitude",
+        "trigger_snap_click_checkbox": "Physical click on snap",
+        "trigger_snap_click_hint": "Layers a sharp one-shot buzz right when the trigger hits its hard stop.",
+        "trigger_snap_click_wall_checkbox": "Click on hard zones",
+        "trig_param_snap_click_strength": "Click strength",
     },
     "ru": {
         "nav_home": "Главная", "nav_presets": "Пресеты", "nav_profiles": "Профили",
@@ -273,6 +277,10 @@ STRINGS = {
         "trig_param_strength_b": "Сила B", "trig_param_frequency": "Частота", "trig_param_period": "Период",
         "trig_param_first_foot": "Первый удар", "trig_param_second_foot": "Второй удар",
         "trig_param_amplitude": "Амплитуда",
+        "trigger_snap_click_checkbox": "Физический щелчок на срыве",
+        "trigger_snap_click_hint": "Добавляет резкий разовый импульс вибрации точно в момент упора курка в жёсткий стопор.",
+        "trigger_snap_click_wall_checkbox": "Щелчок в жёстких зонах",
+        "trig_param_snap_click_strength": "Сила щелчка",
     },
     "zh": {
         "nav_home": "主页", "nav_presets": "预设", "nav_profiles": "配置文件", "nav_triggers": "扳机",
@@ -371,6 +379,10 @@ STRINGS = {
         "trig_param_strength_b": "强度 B", "trig_param_frequency": "频率", "trig_param_period": "周期",
         "trig_param_first_foot": "第一拍", "trig_param_second_foot": "第二拍",
         "trig_param_amplitude": "振幅",
+        "trigger_snap_click_checkbox": "到位时的物理咔嗒声",
+        "trigger_snap_click_hint": "在扳机撞上硬性止点的瞬间，叠加一次短促的振动。",
+        "trigger_snap_click_wall_checkbox": "在硬性区域触发咔嗒声",
+        "trig_param_snap_click_strength": "点击力度",
     },
     "es": {
         "nav_home": "Inicio", "nav_presets": "Preajustes", "nav_profiles": "Perfiles", "nav_triggers": "Gatillos",
@@ -491,6 +503,10 @@ STRINGS = {
         "trig_param_strength_b": "Fuerza B", "trig_param_frequency": "Frecuencia", "trig_param_period": "Periodo",
         "trig_param_first_foot": "Primer golpe", "trig_param_second_foot": "Segundo golpe",
         "trig_param_amplitude": "Amplitud",
+        "trigger_snap_click_checkbox": "Clic físico al topar",
+        "trigger_snap_click_hint": "Añade un pulso de vibración corto justo cuando el gatillo llega al tope duro.",
+        "trigger_snap_click_wall_checkbox": "Clic en zonas duras",
+        "trig_param_snap_click_strength": "Fuerza del clic",
     },
     "de": {
         "nav_home": "Start", "nav_presets": "Presets", "nav_profiles": "Profile", "nav_triggers": "Trigger",
@@ -612,6 +628,10 @@ STRINGS = {
         "trig_param_strength_b": "Stärke B", "trig_param_frequency": "Frequenz", "trig_param_period": "Periode",
         "trig_param_first_foot": "Erster Schlag", "trig_param_second_foot": "Zweiter Schlag",
         "trig_param_amplitude": "Amplitude",
+        "trigger_snap_click_checkbox": "Physischer Klick beim Einrasten",
+        "trigger_snap_click_hint": "Fügt genau in dem Moment, in dem der Trigger auf die harte Wand trifft, einen kurzen Vibrationsimpuls hinzu.",
+        "trigger_snap_click_wall_checkbox": "Klick in harten Zonen",
+        "trig_param_snap_click_strength": "Klickstärke",
     },
     "fr": {
         "nav_home": "Accueil", "nav_presets": "Préréglages", "nav_profiles": "Profils",
@@ -736,6 +756,10 @@ STRINGS = {
         "trig_param_strength_b": "Force B", "trig_param_frequency": "Fréquence", "trig_param_period": "Période",
         "trig_param_first_foot": "Premier temps", "trig_param_second_foot": "Second temps",
         "trig_param_amplitude": "Amplitude",
+        "trigger_snap_click_checkbox": "Clic physique à la butée",
+        "trigger_snap_click_hint": "Ajoute une brève impulsion de vibration exactement au moment où la gâchette atteint la butée dure.",
+        "trigger_snap_click_wall_checkbox": "Clic sur les zones dures",
+        "trig_param_snap_click_strength": "Force du clic",
     },
     "ja": {
         "nav_home": "ホーム", "nav_presets": "プリセット", "nav_profiles": "プロファイル",
@@ -852,6 +876,10 @@ STRINGS = {
         "trig_param_strength_b": "強さ B", "trig_param_frequency": "周波数", "trig_param_period": "周期",
         "trig_param_first_foot": "1拍目", "trig_param_second_foot": "2拍目",
         "trig_param_amplitude": "振幅",
+        "trigger_snap_click_checkbox": "スナップ時の物理クリック",
+        "trigger_snap_click_hint": "トリガーがハードストップに達した瞬間に、鋭い単発の振動を重ねます。",
+        "trigger_snap_click_wall_checkbox": "硬い区間でクリック",
+        "trig_param_snap_click_strength": "クリックの強さ",
     },
     "pt": {
         "nav_home": "Início", "nav_presets": "Predefinições", "nav_profiles": "Perfis",
@@ -974,6 +1002,10 @@ STRINGS = {
         "trig_param_strength_b": "Força B", "trig_param_frequency": "Frequência", "trig_param_period": "Período",
         "trig_param_first_foot": "Primeira batida", "trig_param_second_foot": "Segunda batida",
         "trig_param_amplitude": "Amplitude",
+        "trigger_snap_click_checkbox": "Clique físico no encaixe",
+        "trigger_snap_click_hint": "Adiciona um pulso de vibração curto exatamente no momento em que o gatilho atinge o batente rígido.",
+        "trigger_snap_click_wall_checkbox": "Clique nas zonas rígidas",
+        "trig_param_snap_click_strength": "Força do clique",
     },
     "ko": {
         "nav_home": "홈", "nav_presets": "프리셋", "nav_profiles": "프로필", "nav_triggers": "트리거",
@@ -1086,6 +1118,10 @@ STRINGS = {
         "trig_param_strength_b": "강도 B", "trig_param_frequency": "주파수", "trig_param_period": "주기",
         "trig_param_first_foot": "첫 박자", "trig_param_second_foot": "두 번째 박자",
         "trig_param_amplitude": "진폭",
+        "trigger_snap_click_checkbox": "스냅 시 물리적 클릭",
+        "trigger_snap_click_hint": "트리거가 단단한 정지 지점에 닿는 순간 짧고 강한 진동을 한 번 더해줍니다.",
+        "trigger_snap_click_wall_checkbox": "단단한 구간에서 클릭",
+        "trig_param_snap_click_strength": "클릭 강도",
     },
 }
 

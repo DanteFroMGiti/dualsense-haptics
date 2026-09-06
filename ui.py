@@ -23,7 +23,8 @@ from evdev import ecodes as ec
 
 from presets import (
     PRESETS, PRESET_ORDER, preset_params, TRIGGER_PRESETS, TRIGGER_PRESET_ORDER,
-    TRIGGER_EFFECT_ORDER, TRIGGER_EFFECT_PARAMS,
+    TRIGGER_EFFECT_ORDER, TRIGGER_EFFECT_PARAMS, TRIGGER_PRESET_QUICK_PARAMS,
+    TRIGGER_PRESET_SNAP_CLICK, wall_zones_from_feedback_raw,
 )
 from haptics_engine import (
     DPAD_VIRTUAL_CODE, LEFT_STICK_VIRTUAL_CODE, RIGHT_STICK_VIRTUAL_CODE,
@@ -558,9 +559,39 @@ class HoverGrowWrapper(QWidget):
         h = self._child.minimumSizeHint()
         return QSize(h.width() + 2 * self._grow_px, h.height() + 2 * self._grow_px)
 
+    def hasHeightForWidth(self):
+        return self._child.hasHeightForWidth()
+
+    def heightForWidth(self, width):
+        # A card's word-wrapped hint text genuinely needs more height at a
+        # narrower width - without forwarding this, Qt's constrained-width
+        # layout pass (any QVBoxLayout column, this one included) falls back
+        # to the width-independent sizeHint() above, which silently
+        # undershoots once the wrapper is actually laid out narrower than
+        # that assumption - e.g. two side-by-side trigger columns where one
+        # ends up a few px narrower than the other, wrapping its text onto
+        # an extra line that this wrapper then doesn't leave room for,
+        # visibly squashing that column's cards relative to its sibling's.
+        inner = max(0, width - 2 * self._grow_px)
+        return self._child.heightForWidth(inner) + 2 * self._grow_px
+
     def resizeEvent(self, event):
         self._layout_child()
         super().resizeEvent(event)
+
+    def event(self, event):
+        # The child isn't inside a QLayout (its geometry is set by hand in
+        # _layout_child, so hover-growing doesn't fight Qt's layout engine),
+        # so when its own content changes size (e.g. CustomTriggerCard
+        # rebuilding its sliders for a different mode) Qt has nowhere to
+        # deliver that "I need more room" signal except a LayoutRequest
+        # event posted straight to us. Forward it as our own updateGeometry()
+        # so it keeps bubbling up to whatever real layout manages *this*
+        # widget - without this, the wrapper stays stuck at its original
+        # size and new content gets clipped/squished inside it.
+        if event.type() == QEvent.Type.LayoutRequest:
+            self.updateGeometry()
+        return super().event(event)
 
     def _layout_child(self):
         inset = int(round(self._inset))
@@ -1108,6 +1139,14 @@ class CustomTriggerCard(QFrame):
         self.sliders_layout = QVBoxLayout()
         layout.addLayout(self.sliders_layout)
 
+        # Only feedback-raw's per-zone resistance shape can carry a snap
+        # click (it's the only custom mode able to define more than one
+        # hard-wall zone) - see presets.wall_zones_from_feedback_raw.
+        self.wall_click_check = QCheckBox(t("trigger_snap_click_wall_checkbox"))
+        self.wall_click_check.setToolTip(t("trigger_snap_click_hint"))
+        self.wall_click_check.setChecked(bool(state.get(f"trigger_custom_snap_click_{side}", False)))
+        layout.addWidget(self.wall_click_check)
+
         apply_btn = QPushButton(t("btn_apply"))
         apply_btn.setObjectName("primary")
         apply_btn.clicked.connect(self._apply)
@@ -1132,6 +1171,7 @@ class CustomTriggerCard(QFrame):
             s = IntSlider(_trigger_param_label(key), lo, hi, value)
             self.sliders_layout.addWidget(s)
             self.slider_widgets.append((key, s))
+        self.wall_click_check.setVisible(mode == "feedback_raw")
 
     def _apply(self):
         mode = self.mode_combo.currentData()
@@ -1139,7 +1179,8 @@ class CustomTriggerCard(QFrame):
             self.on_off(self.side)
             return
         values = {key: s.value() for key, s in self.slider_widgets}
-        self.on_apply(mode, values, self.side)
+        wall_click = self.wall_click_check.isChecked() if mode == "feedback_raw" else False
+        self.on_apply(mode, values, self.side, wall_click)
 
     def refresh(self, active_ref):
         self.setObjectName("cardActive" if active_ref == "custom" else "card")
@@ -1182,8 +1223,41 @@ class TriggerColumn(QWidget):
             desc.setWordWrap(True)
             card_layout.addWidget(name)
             card_layout.addWidget(desc)
+
+            quick_sliders = []
+            quick_keys = TRIGGER_PRESET_QUICK_PARAMS.get(pid)
+            if quick_keys:
+                mode = TRIGGER_PRESETS[pid]["mode"]
+                spec = {key: (lo, hi, default) for key, lo, hi, default in TRIGGER_EFFECT_PARAMS[mode]}
+                defaults = TRIGGER_PRESETS[pid]["values"]
+                saved = state.get(f"trigger_preset_params_{side}", {}).get(pid, {})
+                for key in quick_keys:
+                    lo, hi, default = spec[key]
+                    value = max(lo, min(hi, saved.get(key, defaults.get(key, default))))
+                    s = IntSlider(_trigger_param_label(key), lo, hi, value)
+                    card_layout.addWidget(s)
+                    quick_sliders.append((key, s))
+
+            snap_click_check = None
+            snap_strength_slider = None
+            if pid in TRIGGER_PRESET_SNAP_CLICK:
+                default_on = TRIGGER_PRESET_SNAP_CLICK[pid]
+                saved_click = state.get(f"trigger_snap_click_{side}", {}).get(pid, default_on)
+                snap_click_check = QCheckBox(t("trigger_snap_click_checkbox"))
+                snap_click_check.setToolTip(t("trigger_snap_click_hint"))
+                snap_click_check.setChecked(saved_click)
+                card_layout.addWidget(snap_click_check)
+
+                saved_strength = state.get(f"trigger_snap_click_strength_{side}", {}).get(pid, 8)
+                snap_strength_slider = IntSlider(t("trig_param_snap_click_strength"), 1, 8, saved_strength)
+                card_layout.addWidget(snap_strength_slider)
+
             btn = QPushButton(t("btn_apply"))
-            btn.clicked.connect(lambda _=False, p=pid: self.on_apply(p, self.side))
+            btn.clicked.connect(lambda _=False, p=pid, qs=quick_sliders, cc=snap_click_check, ss=snap_strength_slider:
+                                 self.on_apply(p, self.side,
+                                               {key: s.value() for key, s in qs} if qs else None,
+                                               cc.isChecked() if cc else None,
+                                               ss.value() if ss else None))
             card_layout.addWidget(btn)
             layout.addWidget(HoverGrowWrapper(card, grow_px=6))
             self.cards[pid] = card
@@ -1225,8 +1299,15 @@ class TriggersPage(QWidget):
         columns = QHBoxLayout(columns_widget)
         self.left_column = TriggerColumn(state, "left", t("trigger_left_title"), on_apply, on_off, on_apply_custom)
         self.right_column = TriggerColumn(state, "right", t("trigger_right_title"), on_apply, on_off, on_apply_custom)
-        columns.addWidget(self.left_column)
-        columns.addWidget(self.right_column)
+        # Equal stretch, not just addWidget() with no factor - without this,
+        # a few px of leftover width gets split unevenly between the two
+        # columns depending on window size, which is sometimes just enough
+        # to push one side's borderline-length hint text (e.g. Bow's
+        # description) onto an extra wrapped line while the other side
+        # doesn't - the two columns then drift out of vertical alignment
+        # card by card despite having identical content.
+        columns.addWidget(self.left_column, 1)
+        columns.addWidget(self.right_column, 1)
         scroll.setWidget(columns_widget)
         outer.addWidget(scroll, 1)
 
@@ -1838,15 +1919,43 @@ class MainWindow(QWidget):
     def _apply_profile(self, name):
         self._apply_params(self.state["profiles"][name], f"profile:{name}")
 
-    def _apply_trigger_preset(self, preset_id, side, silent=False):
-        ok, err = triggers.apply_trigger_preset(preset_id, side)
-        if ok:
-            self.state[f"trigger_preset_{side}"] = preset_id
-            self._on_state_changed()
-        elif not silent:
-            QMessageBox.warning(self, t("trigger_apply_fail_title"), err)
+    def _apply_trigger_preset(self, preset_id, side, overrides=None, snap_click=None, click_strength=None, silent=False):
+        preset = TRIGGER_PRESETS[preset_id]
+        values = dict(preset["values"])
+        if overrides:
+            values.update(overrides)
+        ok, err = triggers.apply_custom_trigger(preset["mode"], values, side)
+        if not ok:
+            if not silent:
+                QMessageBox.warning(self, t("trigger_apply_fail_title"), err)
+            return
+        self.state[f"trigger_preset_{side}"] = preset_id
+        if overrides:
+            self.state.setdefault(f"trigger_preset_params_{side}", {})[preset_id] = overrides
+        if preset_id in TRIGGER_PRESET_SNAP_CLICK:
+            click_on = TRIGGER_PRESET_SNAP_CLICK[preset_id] if snap_click is None else snap_click
+            self.state.setdefault(f"trigger_snap_click_{side}", {})[preset_id] = click_on
+            strength = 8 if click_strength is None else click_strength
+            self.state.setdefault(f"trigger_snap_click_strength_{side}", {})[preset_id] = strength
+            if click_on:
+                # Everything from "end" through fully pressed (9), not just
+                # the single "end" zone - past the snap the trigger keeps
+                # travelling (and, freshly released from resistance, can
+                # overshoot/bounce a little), so a single-zone wall lets it
+                # drift back out and re-arm while still held down. Bow's
+                # snap sits well before full travel (zone 7 of 9) so that
+                # extra room is much more reachable than Hard Stop's
+                # (zone 8), which is why this only showed up on Bow.
+                triggers.start_snap_click(side, preset["mode"], values, set(range(values["end"], 10)),
+                                           click_amplitude=strength)
+            else:
+                triggers.stop_snap_click(side)
+        else:
+            triggers.stop_snap_click(side)
+        self._on_state_changed()
 
     def _turn_off_triggers(self, side):
+        triggers.stop_snap_click(side)
         ok, err = triggers.turn_off_triggers(side)
         if ok:
             self.state[f"trigger_preset_{side}"] = None
@@ -1854,11 +1963,19 @@ class MainWindow(QWidget):
         else:
             QMessageBox.warning(self, t("trigger_off_fail_title"), err)
 
-    def _apply_custom_trigger(self, mode, values, side, silent=False):
+    def _apply_custom_trigger(self, mode, values, side, wall_click=False, silent=False):
         ok, err = triggers.apply_custom_trigger(mode, values, side)
         if ok:
             self.state[f"trigger_preset_{side}"] = "custom"
             self.state[f"trigger_custom_{side}"] = {"mode": mode, "values": values}
+            if mode == "feedback_raw":
+                self.state[f"trigger_custom_snap_click_{side}"] = bool(wall_click)
+                if wall_click:
+                    triggers.start_snap_click(side, mode, values, wall_zones_from_feedback_raw(values))
+                else:
+                    triggers.stop_snap_click(side)
+            else:
+                triggers.stop_snap_click(side)
             self._on_state_changed()
         elif not silent:
             QMessageBox.warning(self, t("trigger_apply_fail_title"), err)
@@ -1884,9 +2001,14 @@ class MainWindow(QWidget):
         if preset_id == "custom":
             custom = self.state.get(f"trigger_custom_{side}")
             if custom:
-                self._apply_custom_trigger(custom["mode"], custom["values"], side, silent=True)
+                wall_click = self.state.get(f"trigger_custom_snap_click_{side}", False)
+                self._apply_custom_trigger(custom["mode"], custom["values"], side, wall_click=wall_click, silent=True)
         else:
-            self._apply_trigger_preset(preset_id, side, silent=True)
+            overrides = self.state.get(f"trigger_preset_params_{side}", {}).get(preset_id)
+            snap_click = self.state.get(f"trigger_snap_click_{side}", {}).get(preset_id)
+            click_strength = self.state.get(f"trigger_snap_click_strength_{side}", {}).get(preset_id)
+            self._apply_trigger_preset(preset_id, side, overrides=overrides, snap_click=snap_click,
+                                        click_strength=click_strength, silent=True)
 
     def _on_advanced_change(self):
         self.state["active_ref"] = "custom"

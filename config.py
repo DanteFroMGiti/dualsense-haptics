@@ -39,6 +39,23 @@ def _default_state():
         "trigger_custom_left": None,
         "trigger_custom_right": None,
         "trigger_auto_reconnect": True,
+        # Per-side overrides for a preset's own inline "quick" sliders (e.g.
+        # Hard Stop's strength/snap) - keyed by preset id, only ever holds
+        # entries for presets.TRIGGER_PRESET_QUICK_PARAMS keys.
+        "trigger_preset_params_left": {},
+        "trigger_preset_params_right": {},
+        # Per-side, per-preset "snap click" checkbox (presets.TRIGGER_PRESET_SNAP_CLICK).
+        "trigger_snap_click_left": {},
+        "trigger_snap_click_right": {},
+        # Per-side, per-preset snap click strength (1-8, the click's own
+        # vibration amplitude - independent of the preset's "snap"/hardware
+        # snap-force quick slider).
+        "trigger_snap_click_strength_left": {},
+        "trigger_snap_click_strength_right": {},
+        # Per-side "snap click on wall zones" checkbox for the custom
+        # trigger builder's feedback-raw mode.
+        "trigger_custom_snap_click_left": False,
+        "trigger_custom_snap_click_right": False,
         "theme": "system",
         "language": detect_system_language(),
         "sidebar_collapsed": False,
@@ -88,6 +105,14 @@ def load_state():
     state["trigger_custom_left"] = raw.get("trigger_custom_left")
     state["trigger_custom_right"] = raw.get("trigger_custom_right")
     state["trigger_auto_reconnect"] = raw.get("trigger_auto_reconnect", True)
+    state["trigger_preset_params_left"] = raw.get("trigger_preset_params_left", {})
+    state["trigger_preset_params_right"] = raw.get("trigger_preset_params_right", {})
+    state["trigger_snap_click_left"] = raw.get("trigger_snap_click_left", {})
+    state["trigger_snap_click_right"] = raw.get("trigger_snap_click_right", {})
+    state["trigger_snap_click_strength_left"] = raw.get("trigger_snap_click_strength_left", {})
+    state["trigger_snap_click_strength_right"] = raw.get("trigger_snap_click_strength_right", {})
+    state["trigger_custom_snap_click_left"] = raw.get("trigger_custom_snap_click_left", False)
+    state["trigger_custom_snap_click_right"] = raw.get("trigger_custom_snap_click_right", False)
     state["theme"] = raw.get("theme", "system")
     state["language"] = raw.get("language", detect_system_language())
     state["sidebar_collapsed"] = raw.get("sidebar_collapsed", False)

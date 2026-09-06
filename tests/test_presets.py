@@ -11,6 +11,8 @@ from presets import (
     TRIGGER_EFFECT_ORDER,
     TRIGGER_EFFECT_PARAMS,
     TRIGGER_PRESET_ORDER,
+    TRIGGER_PRESET_QUICK_PARAMS,
+    TRIGGER_PRESET_SNAP_CLICK,
     TRIGGER_PRESETS,
     TRIGGER_RAW_CLI_NAME,
     preset_params,
@@ -98,9 +100,24 @@ class TestTriggerPresets:
 
     @pytest.mark.parametrize("preset_id", sorted(TRIGGER_PRESETS))
     def test_args_pass_dualsensectl_validation(self, preset_id):
-        mode, *args = TRIGGER_PRESETS[preset_id]["args"]
+        preset = TRIGGER_PRESETS[preset_id]
+        mode = preset["mode"]
         assert mode in _MODE_CHECKS, f"unknown dualsensectl mode {mode!r}"
+        spec = TRIGGER_EFFECT_PARAMS[mode]
+        args = [str(preset["values"][key]) for key, _lo, _hi, _default in spec]
         _MODE_CHECKS[mode](args)
+
+    @pytest.mark.parametrize("preset_id", sorted(TRIGGER_PRESET_QUICK_PARAMS))
+    def test_quick_params_are_real_fields_of_their_own_mode(self, preset_id):
+        mode = TRIGGER_PRESETS[preset_id]["mode"]
+        valid_keys = {key for key, _lo, _hi, _default in TRIGGER_EFFECT_PARAMS[mode]}
+        assert set(TRIGGER_PRESET_QUICK_PARAMS[preset_id]) <= valid_keys
+
+    @pytest.mark.parametrize("preset_id", sorted(TRIGGER_PRESET_SNAP_CLICK))
+    def test_snap_click_presets_are_bow_mode(self, preset_id):
+        # start_snap_click's wall zone is derived from the bow effect's own
+        # "end" parameter - only meaningful for presets that use it.
+        assert TRIGGER_PRESETS[preset_id]["mode"] == "bow"
 
 
 class TestTriggerEffectBuilder:

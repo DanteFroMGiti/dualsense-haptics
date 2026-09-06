@@ -388,7 +388,9 @@ class Plugin:
     async def apply_trigger_preset(self, preset_id: str, side: str) -> bool:
         if preset_id not in presets.TRIGGER_PRESETS:
             return False
-        args = ["dualsensectl"] + _dualsensectl_prefix() + ["trigger", side] + presets.TRIGGER_PRESETS[preset_id]["args"]
+        preset = presets.TRIGGER_PRESETS[preset_id]
+        args = (["dualsensectl"] + _dualsensectl_prefix() + ["trigger", side]
+                + _build_custom_args(preset["mode"], preset["values"]))
         try:
             result = subprocess.run(args, capture_output=True, text=True, timeout=3)
         except (OSError, subprocess.TimeoutExpired):
