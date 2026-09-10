@@ -719,12 +719,13 @@ def _drain_stale_audio(stdout, chunk_bytes):
     return max(extra, 0)
 
 
-def _spawn_stereo_parec(audio_prefix, rate):
+def _spawn_stereo_parec(audio_prefix, rate, source="@DEFAULT_SINK@.monitor"):
     """Shared by every BT/SAxense session (both use identical parec args) -
     also reused to respawn parec in place after a large stall (see
-    PAREC_RESTART_STALL_CHUNKS) without duplicating this call."""
+    PAREC_RESTART_STALL_CHUNKS) or a capture-source change (see
+    HapticsEngine._capture_source()) without duplicating this call."""
     return subprocess.Popen(
-        audio_prefix + ["parec", "-d", "@DEFAULT_SINK@.monitor", "--format=s16le",
+        audio_prefix + ["parec", "-d", source, "--format=s16le",
                          f"--rate={rate}", "--channels=2", "--raw", "--latency-msec=20"],
         # bufsize=0: an io.BufferedReader on stdout would eagerly pull ahead
         # into its own userspace buffer on .read(), hiding stale audio there
@@ -807,9 +808,16 @@ class HapticsEngine(threading.Thread):
     thread-safe queues (queue.Queue, not Qt signals, so this module has no
     GUI dependency)."""
 
-    def __init__(self, config):
+    def __init__(self, config, capture_source=None):
         super().__init__(daemon=True, name="HapticsEngine")
         self.config = config
+        # Desktop-only (see app_audio_binding.py) - a plain mutable dict, not
+        # part of `config`/state, so a narrowed capture source never gets
+        # deep-copied into a saved profile (config.save_current() only ever
+        # copies `state["active"]`). Optional/defaulted so callers that never
+        # narrow anything (e.g. the Decky plugin's headless_runner.py) don't
+        # need to know this exists.
+        self.capture_source = capture_source if capture_source is not None else {"source": None}
         self.status_queue = queue.Queue()
         self.level_queue = queue.Queue(maxsize=1)
         self.connection_queue = queue.Queue(maxsize=1)
@@ -818,6 +826,14 @@ class HapticsEngine(threading.Thread):
         # _teardown_bt_proxy_session(). Only ever destroyed (not just
         # detached) when the feature is disabled or the engine stops.
         self._bt_proxy_session = None
+
+    def _capture_source(self):
+        """Which parec -d target the current/next session should use - live,
+        re-read every chunk by each session loop's own while-condition so a
+        narrowed (or widened-back) capture source takes effect by respawning
+        parec in place, the same way a stall respawn already does, without
+        tearing down the controller connection. See app_audio_binding.py."""
+        return self.capture_source.get("source") or "@DEFAULT_SINK@.monitor"
 
     def stop(self):
         self._stop_event.set()
@@ -1086,8 +1102,9 @@ class HapticsEngine(threading.Thread):
         quad_fmt = f"<{chunk_samples * 4}h"
 
         audio_prefix = _audio_subprocess_prefix()
+        capture_source = self._capture_source()
         parec = subprocess.Popen(
-            audio_prefix + ["parec", "-d", "@DEFAULT_SINK@.monitor", "--format=s16le",
+            audio_prefix + ["parec", "-d", capture_source, "--format=s16le",
                              f"--rate={rate}", "--channels=2", "--raw", "--latency-msec=20"],
             # bufsize=0: an io.BufferedReader on stdout would eagerly pull
             # ahead into its own userspace buffer on .read(), hiding stale
@@ -1124,7 +1141,8 @@ class HapticsEngine(threading.Thread):
         led_last_write = 0.0
 
         try:
-            while not self._stop_event.is_set() and self.config.get("direct_audio", {}).get("enabled", True):
+            while (not self._stop_event.is_set() and self.config.get("direct_audio", {}).get("enabled", True)
+                   and self._capture_source() == capture_source):
                 _drain_stale_audio(parec.stdout, stereo_bytes)
                 data = parec.stdout.read(stereo_bytes)
                 if len(data) < stereo_bytes:
@@ -1293,7 +1311,8 @@ class HapticsEngine(threading.Thread):
         # bt_hid_proxy.find_clone_hidraw_path()'s own comment on this race.
         hidraw_file = os.fdopen(os.open(hidraw_path, os.O_WRONLY), "wb", buffering=0)
         audio_prefix = _audio_subprocess_prefix()
-        parec = _spawn_stereo_parec(audio_prefix, rate)
+        capture_source = self._capture_source()
+        parec = _spawn_stereo_parec(audio_prefix, rate, capture_source)
         saxense_writer = _SaxenseWriter(hidraw_file.fileno(), label="bt_direct_audio")
 
         button_strong_env = button_weak_env = 0.0
@@ -1317,7 +1336,7 @@ class HapticsEngine(threading.Thread):
 
         try:
             while (not self._stop_event.is_set() and not self._bt_proxy_should_retry("bluetooth")
-                   and self._bt_should_use_saxense()):
+                   and self._bt_should_use_saxense() and self._capture_source() == capture_source):
                 dropped = _drain_stale_audio(parec.stdout, stereo_bytes)
                 if self._should_restart_saxense_for_stall(dropped, stereo_bytes):
                     print(f"[bt_direct_audio] stall detected ({dropped} bytes dropped) - "
@@ -1553,9 +1572,10 @@ class HapticsEngine(threading.Thread):
         """Synthesized-envelope rumble through the proxy - structurally a
         copy of _session_ff (same parec spawn, same bass/treble/button DSP),
         swapping the FF_RUMBLE write for the proxy's relay+merge each tick."""
+        capture_source = self._capture_source()
         proc = subprocess.Popen(
             _audio_subprocess_prefix() +
-            ["parec", "-d", "@DEFAULT_SINK@.monitor", "--format=s16le",
+            ["parec", "-d", capture_source, "--format=s16le",
              f"--rate={RATE}", f"--channels={CHANNELS}", "--raw", "--latency-msec=20"],
             # bufsize=0 - see the other parec spawns' identical comment.
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
@@ -1588,7 +1608,7 @@ class HapticsEngine(threading.Thread):
 
         try:
             while (not self._stop_event.is_set() and self.config.get("bt_hid_proxy", {}).get("enabled", False)
-                   and not self._bt_should_use_saxense()):
+                   and not self._bt_should_use_saxense() and self._capture_source() == capture_source):
                 readable, _, _ = select.select(
                     [session.real_fd, session.uhid_fd, proc.stdout], [], [], 0.02)
 
@@ -1734,7 +1754,8 @@ class HapticsEngine(threading.Thread):
 
         hidraw_file = os.fdopen(os.open(clone_hidraw, os.O_WRONLY), "wb", buffering=0)
         audio_prefix = _audio_subprocess_prefix()
-        parec = _spawn_stereo_parec(audio_prefix, rate)
+        capture_source = self._capture_source()
+        parec = _spawn_stereo_parec(audio_prefix, rate, capture_source)
         saxense_writer = _SaxenseWriter(hidraw_file.fileno(), label="bt_proxy_saxense")
 
         button_strong_env = button_weak_env = 0.0
@@ -1757,7 +1778,7 @@ class HapticsEngine(threading.Thread):
 
         try:
             while (not self._stop_event.is_set() and self.config.get("bt_hid_proxy", {}).get("enabled", False)
-                   and self._bt_should_use_saxense()):
+                   and self._bt_should_use_saxense() and self._capture_source() == capture_source):
                 tick_start = time.monotonic()
                 readable, _, _ = select.select(
                     [session.real_fd, session.uhid_fd, parec.stdout], [], [], 0.02)
@@ -1991,9 +2012,10 @@ class HapticsEngine(threading.Thread):
         effect_id = dev.upload_effect(effect)
         effect.id = effect_id
 
+        capture_source = self._capture_source()
         proc = subprocess.Popen(
             _audio_subprocess_prefix() +
-            ["parec", "-d", "@DEFAULT_SINK@.monitor", "--format=s16le",
+            ["parec", "-d", capture_source, "--format=s16le",
              f"--rate={RATE}", f"--channels={CHANNELS}", "--raw", "--latency-msec=20"],
             # bufsize=0 - see the other parec spawns' identical comment.
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
@@ -2038,7 +2060,7 @@ class HapticsEngine(threading.Thread):
 
         try:
             while (not self._stop_event.is_set() and not self._bt_proxy_should_retry(kind)
-                   and not self._should_switch_from_ff(kind)):
+                   and not self._should_switch_from_ff(kind) and self._capture_source() == capture_source):
                 _drain_stale_audio(proc.stdout, CHUNK_BYTES)
                 data = proc.stdout.read(CHUNK_BYTES)
                 if len(data) < CHUNK_BYTES:

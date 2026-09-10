@@ -14,7 +14,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QGroupBox, QCheckBox, QPushButton, QProgressBar,
-    QStackedWidget, QButtonGroup, QListWidget, QListWidgetItem, QLineEdit,
+    QStackedWidget, QButtonGroup, QRadioButton, QListWidget, QListWidgetItem, QLineEdit,
     QInputDialog, QMessageBox, QFrame, QScrollArea, QComboBox,
     QGraphicsScene, QGraphicsPixmapItem, QGraphicsBlurEffect, QGraphicsOpacityEffect,
 )
@@ -32,6 +32,7 @@ from haptics_engine import (
     BT_CHUNK_MS, BT_CHUNK_MS_CHOICES,
     BUTTON_CLICK_HZ, BUTTON_CLICK_HZ_MIN, BUTTON_CLICK_HZ_MAX,
 )
+import app_audio_binding
 import bt_hid_proxy
 import triggers
 import theme
@@ -71,7 +72,8 @@ BUTTON_OPTIONS = LEFT_BUTTON_OPTIONS + RIGHT_BUTTON_OPTIONS
 
 NAV_ITEMS = [
     ("home", "nav_home", "🏠"), ("presets", "nav_presets", "📋"),
-    ("profiles", "nav_profiles", "👤"), ("triggers", "nav_triggers", "🎯"),
+    ("profiles", "nav_profiles", "👤"), ("app_audio", "nav_app_audio", "🔊"),
+    ("triggers", "nav_triggers", "🎯"),
     ("button_haptic", "nav_button_haptic", "🔘"), ("advanced", "nav_advanced", "📳"),
     ("led", "nav_led", "💡"), ("experimental", "nav_experimental", "🧪"),
     ("settings", "nav_settings", "⚙️"),
@@ -1764,10 +1766,157 @@ class SettingsPage(QWidget):
         outer.addStretch(1)
 
 
+class AppAudioBindingPage(QWidget):
+    """Desktop-only (see app_audio_binding.py): a list of apps the user has
+    added, plus "Global" (always listed first, fixed) - all in one radio-
+    button group, so at most one is ever selected and mixing multiple
+    audio sources is never possible. While the selected app is playing
+    sound, haptics narrow to just its audio; Global is in effect otherwise
+    (nothing selected, or the selection isn't currently making sound).
+    Purely narrows *which audio the engine listens to* - has no notion of
+    presets/profiles at all, deliberately: this is its own page precisely
+    so that concept never has to appear here."""
+
+    _COMBO_REFRESH_MS = 2000
+
+    def __init__(self, state, list_active_apps, on_toggle_enabled, on_change):
+        super().__init__()
+        self.state = state
+        self.list_active_apps = list_active_apps
+        self.on_change = on_change
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 28, 28, 28)
+        title = QLabel(t("app_audio_binding_title"))
+        title.setProperty("role", "h1")
+        outer.addWidget(title)
+        hint = QLabel(t("app_audio_binding_hint"))
+        hint.setProperty("role", "hint")
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
+
+        self.enable_check = QCheckBox(t("app_audio_binding_checkbox"))
+        self.enable_check.setChecked(state.get("app_audio_binding_enabled", False))
+        self.enable_check.toggled.connect(on_toggle_enabled)
+        outer.addWidget(self.enable_check)
+
+        add_row = QHBoxLayout()
+        self.app_combo = QComboBox()
+        # Editable, not just a picker over list_active_apps() - that list is
+        # only ever whatever's making sound right now, so there'd otherwise
+        # be no way to add an app that isn't currently playing anything
+        # (e.g. a game not launched yet) at all.
+        self.app_combo.setEditable(True)
+        self.app_combo.lineEdit().setPlaceholderText(t("app_audio_binding_combo_placeholder"))
+        add_btn = QPushButton(t("btn_add"))
+        add_btn.setObjectName("primary")
+        add_btn.clicked.connect(self._add_app)
+        add_row.addWidget(self.app_combo, 1)
+        add_row.addWidget(add_btn)
+        outer.addLayout(add_row)
+
+        self.rows_widget = QWidget()
+        self.rows_layout = QVBoxLayout(self.rows_widget)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.rows_widget)
+        outer.addWidget(scroll, 1)
+
+        # No manual "refresh" button - the add-picker's own list of
+        # currently-playing apps keeps itself current on a timer instead.
+        self._combo_refresh_timer = QTimer(self)
+        self._combo_refresh_timer.timeout.connect(self._refresh_app_combo)
+        self._combo_refresh_timer.start(self._COMBO_REFRESH_MS)
+
+        self._refresh_app_combo()
+        self.refresh()
+
+    def refresh(self):
+        self.enable_check.setChecked(self.state.get("app_audio_binding_enabled", False))
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        apps = self.state.get("app_audio_binding_apps", [])
+        selected = self.state.get("app_audio_binding_selected")
+
+        # One exclusive group per refresh (old radio buttons are being
+        # thrown away above) - Global is a real member of it, not just a
+        # fixed label, so picking it is how you clear the selection back to
+        # "nothing bound" rather than needing a separate action for that.
+        self._button_group = QButtonGroup(self)
+        self._button_group.setExclusive(True)
+
+        self.rows_layout.addWidget(self._make_row(
+            t("target_global_option"), checked=(selected is None),
+            on_select=lambda: self._set_selected(None), on_remove=None, removable=False))
+
+        for app in sorted(apps):
+            self.rows_layout.addWidget(self._make_row(
+                app, checked=(selected == app),
+                on_select=lambda a=app: self._set_selected(a),
+                on_remove=lambda a=app: self._remove_app(a)))
+        self.rows_layout.addStretch(1)
+
+    def _make_row(self, label_text, checked, on_select, on_remove, removable=True):
+        row_widget = QWidget()
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel(label_text), 1)
+        radio = QRadioButton()
+        radio.setChecked(checked)
+        self._button_group.addButton(radio)
+        # Only react to the button becoming checked - in an exclusive group,
+        # selecting a new one also fires toggled(False) on whichever was
+        # previously checked, which would otherwise re-run this twice.
+        radio.toggled.connect(lambda is_checked: on_select() if is_checked else None)
+        row.addWidget(radio, 1)
+        remove_btn = QPushButton(t("btn_remove"))
+        remove_btn.setEnabled(removable and on_remove is not None)
+        if on_remove is not None:
+            remove_btn.clicked.connect(on_remove)
+        row.addWidget(remove_btn)
+        return row_widget
+
+    def _refresh_app_combo(self):
+        current_text = self.app_combo.currentText()
+        self.app_combo.clear()
+        self.app_combo.addItems(self.list_active_apps())
+        self.app_combo.setCurrentText(current_text)
+
+    def _add_app(self):
+        app = self.app_combo.currentText().strip()
+        if not app:
+            return
+        apps = self.state.setdefault("app_audio_binding_apps", [])
+        if app not in apps:
+            apps.append(app)
+            self.on_change()
+            self.refresh()
+        self.app_combo.setCurrentText("")
+
+    def _set_selected(self, app):
+        self.state["app_audio_binding_selected"] = app
+        self.on_change()
+
+    def _remove_app(self, app):
+        apps = self.state.setdefault("app_audio_binding_apps", [])
+        if app in apps:
+            apps.remove(app)
+            if self.state.get("app_audio_binding_selected") == app:
+                self.state["app_audio_binding_selected"] = None
+            self.on_change()
+            self.refresh()
+
+
 # ---------------------------------------------------------------- main window
 
 class MainWindow(QWidget):
-    def __init__(self, state, engine_holder, start_engine_cb, stop_engine_cb, save_cb):
+    def __init__(self, state, engine_holder, start_engine_cb, stop_engine_cb, save_cb,
+                 capture_source_box=None):
         super().__init__()
         self.state = state
         self.engine_holder = engine_holder
@@ -1776,6 +1925,10 @@ class MainWindow(QWidget):
         self.save_cb = save_cb
         self.enabled = True
         self._current_page_key = "home"
+        # Desktop-only per-app audio binding (see app_audio_binding.py) -
+        # optional so this class stays constructible without the feature
+        # wired in (e.g. in a future headless/test context).
+        self.capture_source_box = capture_source_box if capture_source_box is not None else {}
 
         self.setWindowTitle("DualSense Haptics")
         self._apply_window_icon()
@@ -1845,6 +1998,9 @@ class MainWindow(QWidget):
         self.home_page = HomePage(self.state, self.engine_holder, self._toggle)
         self.presets_page = PresetsPage(self.state, self._apply_preset)
         self.profiles_page = ProfilesPage(self.state, self._apply_profile, self._on_state_changed)
+        self.app_audio_binding_page = AppAudioBindingPage(
+            self.state, app_audio_binding.list_active_app_names,
+            self._set_app_audio_binding_enabled, self._on_state_changed)
         self.triggers_page = TriggersPage(
             self.state, self._apply_trigger_preset, self._turn_off_triggers, self._apply_custom_trigger)
         self.button_haptic_page = ButtonHapticPage(self.state, self.save_cb)
@@ -1857,6 +2013,7 @@ class MainWindow(QWidget):
             "home": self.home_page,
             "presets": self.presets_page,
             "profiles": self.profiles_page,
+            "app_audio": self.app_audio_binding_page,
             "triggers": self.triggers_page,
             "button_haptic": self.button_haptic_page,
             "advanced": self.advanced_page,
@@ -1918,6 +2075,15 @@ class MainWindow(QWidget):
 
     def _apply_profile(self, name):
         self._apply_params(self.state["profiles"][name], f"profile:{name}")
+
+    def _set_app_audio_binding_enabled(self, checked):
+        self.state["app_audio_binding_enabled"] = checked
+        if checked:
+            app_audio_binding.start_watching(self.state, self.capture_source_box)
+        else:
+            app_audio_binding.stop_watching()
+            app_audio_binding.clear_narrowing(self.capture_source_box)
+        self._on_state_changed()
 
     def _apply_trigger_preset(self, preset_id, side, overrides=None, snap_click=None, click_strength=None, silent=False):
         preset = TRIGGER_PRESETS[preset_id]
@@ -2019,6 +2185,7 @@ class MainWindow(QWidget):
         self.home_page.refresh_active()
         self.presets_page.refresh()
         self.profiles_page.refresh()
+        self.app_audio_binding_page.refresh()
         self.triggers_page.refresh()
         self.advanced_page.refresh()
         self.led_page.refresh()

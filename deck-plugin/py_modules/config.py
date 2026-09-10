@@ -56,6 +56,21 @@ def _default_state():
         # trigger builder's feedback-raw mode.
         "trigger_custom_snap_click_left": False,
         "trigger_custom_snap_click_right": False,
+        # Desktop-only per-app audio binding (see app_audio_binding.py).
+        # Master toggle defaults off - creates a virtual PipeWire sink, so
+        # it's opt-in. Purely narrows which audio the engine listens to;
+        # unrelated to (and never touches) presets/profiles.
+        "app_audio_binding_enabled": False,
+        # App names (application.process.binary) the user has added on the
+        # "App Sound" page.
+        "app_audio_binding_apps": [],
+        # At most one of the above, or None for Global - mutually exclusive
+        # by construction (the UI uses a radio-button group), so mixing
+        # multiple audio sources is never possible. While the selected
+        # app is producing sound, capture narrows to it; otherwise (nothing
+        # selected, or it isn't currently making sound) capture stays on
+        # the full system ("Global").
+        "app_audio_binding_selected": None,
         "theme": "system",
         "language": detect_system_language(),
         "sidebar_collapsed": False,
@@ -113,6 +128,33 @@ def load_state():
     state["trigger_snap_click_strength_right"] = raw.get("trigger_snap_click_strength_right", {})
     state["trigger_custom_snap_click_left"] = raw.get("trigger_custom_snap_click_left", False)
     state["trigger_custom_snap_click_right"] = raw.get("trigger_custom_snap_click_right", False)
+    state["app_audio_binding_enabled"] = raw.get("app_audio_binding_enabled", False)
+    raw_apps = raw.get("app_audio_binding_apps")
+    if isinstance(raw_apps, list):
+        state["app_audio_binding_apps"] = raw_apps
+        state["app_audio_binding_selected"] = raw.get("app_audio_binding_selected")
+    elif isinstance(raw_apps, dict):
+        # Migrate from this feature's second format: a dict of app ->
+        # {"enabled": bool}, before "only one active at a time" was
+        # enforced (multiple apps could independently be "enabled"). Picks
+        # whichever was enabled first as the initial single selection;
+        # every app carries forward into the new plain list either way.
+        state["app_audio_binding_apps"] = list(raw_apps)
+        state["app_audio_binding_selected"] = next(
+            (name for name, cfg in raw_apps.items() if cfg.get("enabled")), None)
+    else:
+        # Migrate from this feature's original format (a known-apps list
+        # plus a per-profile bound_apps list, back when adding an app meant
+        # picking which profile it activated) - carries forward whatever the
+        # user already set up rather than dropping it.
+        names = set(raw.get("app_audio_binding_known_apps", []))
+        selected = None
+        for params in raw.get("profiles", {}).values():
+            for name in params.get("bound_apps", []):
+                names.add(name)
+                selected = selected or name
+        state["app_audio_binding_apps"] = sorted(names)
+        state["app_audio_binding_selected"] = selected
     state["theme"] = raw.get("theme", "system")
     state["language"] = raw.get("language", detect_system_language())
     state["sidebar_collapsed"] = raw.get("sidebar_collapsed", False)

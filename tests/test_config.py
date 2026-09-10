@@ -46,6 +46,12 @@ class TestDefaultState:
         assert state["trigger_auto_reconnect"] is True
         assert state["theme"] == "system"
 
+    def test_app_audio_binding_defaults(self):
+        state = config.load_state()
+        assert state["app_audio_binding_enabled"] is False
+        assert state["app_audio_binding_apps"] == []
+        assert state["app_audio_binding_selected"] is None
+
     def test_active_carries_full_engine_schema(self):
         # preset params only define DSP fields; the merge must add the rest
         # (button_haptics, direct_audio, ...) so the engine never KeyErrors
@@ -88,6 +94,15 @@ class TestRoundtrip:
         assert loaded["profiles"]["old"]["master_gain"] == 0.5
         assert "button_haptics" in loaded["profiles"]["old"]
 
+    def test_app_audio_binding_apps_round_trip(self):
+        state = config.load_state()
+        state["app_audio_binding_apps"].append("firefox")
+        state["app_audio_binding_selected"] = "firefox"
+        config.save_state(state)
+        loaded = config.load_state()
+        assert loaded["app_audio_binding_apps"] == ["firefox"]
+        assert loaded["app_audio_binding_selected"] == "firefox"
+
 
 class TestLegacyMigrations:
     def test_flat_params_become_a_named_profile(self):
@@ -126,3 +141,38 @@ class TestLegacyMigrations:
         state = config.load_state()
         assert state["trigger_preset_left"] == "soft"
         assert state["trigger_preset_right"] is None
+
+    def test_app_audio_binding_original_format_is_migrated(self):
+        # The original format, before profiles were dropped from this
+        # feature entirely: adding an app meant picking which profile it
+        # switched to (a known-apps list plus each profile's own bound_apps
+        # list) - migration carries all of that forward into the flat list,
+        # picking one of the previously-bound apps as the initial selection.
+        _write_raw({
+            "active": {}, "active_ref": "custom",
+            "app_audio_binding_known_apps": ["vlc"],
+            "profiles": {"Movie": {"bound_apps": ["mpv"]}},
+        })
+        state = config.load_state()
+        assert sorted(state["app_audio_binding_apps"]) == ["mpv", "vlc"]
+        assert state["app_audio_binding_selected"] == "mpv"
+
+    def test_app_audio_binding_second_format_is_migrated(self):
+        # Before "only one active at a time" was enforced: a dict of app ->
+        # {"enabled": bool}, where more than one could independently be on.
+        _write_raw({
+            "active": {}, "active_ref": "custom",
+            "app_audio_binding_apps": {"vlc": {"enabled": False}, "mpv": {"enabled": True}},
+        })
+        state = config.load_state()
+        assert sorted(state["app_audio_binding_apps"]) == ["mpv", "vlc"]
+        assert state["app_audio_binding_selected"] == "mpv"
+
+    def test_app_audio_binding_current_format_is_used_as_is(self):
+        _write_raw({
+            "active": {}, "active_ref": "custom",
+            "app_audio_binding_apps": ["vlc"], "app_audio_binding_selected": "vlc",
+        })
+        state = config.load_state()
+        assert state["app_audio_binding_apps"] == ["vlc"]
+        assert state["app_audio_binding_selected"] == "vlc"

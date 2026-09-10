@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication
 from haptics_engine import HapticsEngine
 from config import load_state, save_state
 from ui import MainWindow, TrayApp, install_press_animations
+import app_audio_binding
 import bt_hid_proxy
 import theme
 import i18n
@@ -29,11 +30,16 @@ def main():
     install_press_animations(app)
 
     engine_box = {"engine": None}
+    # Desktop-only per-app audio binding (see app_audio_binding.py) - a
+    # sibling to `state`, never inside it, so a narrowed capture source can
+    # never get deep-copied into a saved profile (config.save_current()
+    # only ever copies state["active"]).
+    capture_source_box = {"source": None}
 
     def start_engine():
         if engine_box["engine"] is not None:
             return
-        engine = HapticsEngine(state["active"])
+        engine = HapticsEngine(state["active"], capture_source_box)
         engine.start()
         engine_box["engine"] = engine
 
@@ -48,6 +54,8 @@ def main():
         save_state(state)
 
     start_engine()
+    if state.get("app_audio_binding_enabled", False):
+        app_audio_binding.start_watching(state, capture_source_box)
 
     main_window = MainWindow(
         state,
@@ -55,6 +63,7 @@ def main():
         start_engine_cb=start_engine,
         stop_engine_cb=stop_engine,
         save_cb=save,
+        capture_source_box=capture_source_box,
     )
 
     tray = TrayApp(
@@ -68,6 +77,7 @@ def main():
         tray._open_window()
 
     exit_code = app.exec()
+    app_audio_binding.stop_watching()
     stop_engine()
     sys.exit(exit_code)
 

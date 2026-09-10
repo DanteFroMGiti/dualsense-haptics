@@ -265,3 +265,23 @@ class TestButtonSideTable:
         assert he.BUTTON_SIDE[ecodes.BTN_THUMBL] == "strong"
         assert he.BUTTON_SIDE[ecodes.BTN_TR] == "weak"
         assert he.BUTTON_SIDE[ecodes.BTN_SOUTH] == "weak"
+
+
+class TestCaptureSource:
+    """See app_audio_binding.py - a narrowed capture source is threaded in
+    as a separate mutable dict, never through `config`, so it can never be
+    deep-copied into a saved profile."""
+
+    def test_defaults_to_full_system_monitor(self):
+        engine = he.HapticsEngine({})
+        assert engine._capture_source() == "@DEFAULT_SINK@.monitor"
+
+    def test_empty_source_value_falls_back_to_full_system_monitor(self):
+        engine = he.HapticsEngine({}, {"source": None})
+        assert engine._capture_source() == "@DEFAULT_SINK@.monitor"
+
+    def test_reads_a_narrowed_source_live(self):
+        capture_source = {"source": None}
+        engine = he.HapticsEngine({}, capture_source)
+        capture_source["source"] = "dualsense_haptics_app_tap.monitor"
+        assert engine._capture_source() == "dualsense_haptics_app_tap.monitor"
