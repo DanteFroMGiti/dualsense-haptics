@@ -176,3 +176,48 @@ class TestLegacyMigrations:
         state = config.load_state()
         assert state["app_audio_binding_apps"] == ["vlc"]
         assert state["app_audio_binding_selected"] == "vlc"
+
+    def test_led_visualizer_is_migrated_to_the_led_preset_system(self):
+        # Before the LED preset system existed: a lone, always-audio-
+        # reactive "led_visualizer" dict - values must carry over as the
+        # new "immersive" preset's own config, not get overwritten by
+        # fresh defaults.
+        _write_raw({
+            "active": {"led_visualizer": {"enabled": True, "attack": 0.3, "release": 0.2,
+                                           "gamma": 2.1, "bass_priority": 0.9}},
+            "active_ref": "custom",
+        })
+        state = config.load_state()
+        assert "led_visualizer" not in state["active"]
+        led = state["active"]["led"]
+        assert led["enabled"] is True
+        assert led["preset"] == "immersive"
+        assert led["immersive"]["attack"] == 0.3
+        assert led["immersive"]["release"] == 0.2
+        assert led["immersive"]["gamma"] == 2.1
+        assert led["immersive"]["bass_priority"] == 0.9
+        # a key the old led_visualizer format never had (added after this
+        # migration existed) still gets backfilled by _merge_defaults
+        assert led["immersive"]["bass_color"] == [255, 0, 0]
+        # every other preset's defaults still get backfilled by _merge_defaults
+        assert "static" in led and "rainbow" in led
+
+    def test_led_new_format_is_left_untouched(self):
+        _write_raw({
+            "active": {"led": {"enabled": True, "preset": "rainbow", "rainbow": {"interval_s": 10.0}}},
+            "active_ref": "custom",
+        })
+        state = config.load_state()
+        assert state["active"]["led"]["preset"] == "rainbow"
+        assert state["active"]["led"]["rainbow"]["interval_s"] == 10.0
+
+    def test_led_visualizer_is_migrated_per_profile(self):
+        _write_raw({
+            "active": {}, "active_ref": "custom",
+            "profiles": {"Old": {"led_visualizer": {"enabled": True, "attack": 0.4}}},
+        })
+        state = config.load_state()
+        led = state["profiles"]["Old"]["led"]
+        assert led["preset"] == "immersive"
+        assert led["immersive"]["attack"] == 0.4
+        assert "led_visualizer" not in state["profiles"]["Old"]

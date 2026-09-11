@@ -15,9 +15,11 @@ drives it).
 """
 import binascii
 import collections
+import colorsys
 import fcntl
 import glob
 import json
+import math
 import os
 import queue
 import select
@@ -196,10 +198,10 @@ def build_create2():
     return struct.pack("<I", UHID_CREATE2) + body
 
 
-BASS_PRIORITY = 0.6  # default for the "bass_priority" led_visualizer config knob
+BASS_PRIORITY = 0.6  # default for the Immersive preset's "bass_priority" config knob
 
 
-def led_rgb_and_bar(led):
+def led_rgb_and_bar(led, colors=None):
     """led = (bass_level, mid_level, treble_level, bass_priority), each
     level 0.0-1.0 - bundled into one tuple rather than four separate
     parameters since it threads through several call layers untouched.
@@ -209,12 +211,14 @@ def led_rgb_and_bar(led):
     already driving the strong/weak rumble motors, reused rather than
     recomputed; mid has no motor to reuse from - see its own computation at
     each caller for why. The color blend is additive per channel
-    (BASS_COLOR/MID_COLOR/TREBLE_COLOR, each scaled by its own band's level
-    - see those constants' own comment), shared by both the Bluetooth HID
-    Proxy's own report-byte path (apply_led_visualizer(), desktop only) and
-    the plain sysfs LED class device path (write_led_sysfs() in
-    haptics_engine.py, used wherever the proxy isn't available, e.g. the
-    Decky plugin) so retuning the blend only ever needs doing once.
+    (colors, each scaled by its own band's level - defaults to
+    BASS_COLOR/MID_COLOR/TREBLE_COLOR, but the Immersive preset's own
+    bass_color/mid_color/treble_color config can override any of them),
+    shared by both the Bluetooth HID Proxy's own report-byte path
+    (apply_led_visualizer(), desktop only) and the plain sysfs LED class
+    device path (write_led_sysfs() in haptics_engine.py, used wherever the
+    proxy isn't available, e.g. the Decky plugin) so retuning the blend
+    only ever needs doing once.
 
     bass_priority ducks mid/treble's contribution proportionally to the
     bass level before mixing - confirmed on real hardware that plain
@@ -231,44 +235,192 @@ def led_rgb_and_bar(led):
     duck = 1.0 - max(0.0, min(1.0, bass_priority)) * bass_level
     mid_level *= duck
     treble_level *= duck
+    bass_color, mid_color, treble_color = colors or (BASS_COLOR, MID_COLOR, TREBLE_COLOR)
     rgb = tuple(
         min(255, round(bass_level * bc + mid_level * mc + treble_level * tc))
-        for bc, mc, tc in zip(BASS_COLOR, MID_COLOR, TREBLE_COLOR)
+        for bc, mc, tc in zip(bass_color, mid_color, treble_color)
     )
     return rgb, lit
 
 
-def apply_led_visualizer(report, led):
-    """Bluetooth HID Proxy report-byte variant of led_rgb_and_bar() - see
-    there for the color/bar-graph math. Mutates `report` in place; caller
-    still owns recomputing the CRC afterward. See command_lightbar3/
+def _bar_mask(lit):
+    """Left-to-right bar graph (Immersive/Battery) - `lit` of the 5
+    player-indicator LEDs on, starting from index 0."""
+    return tuple(i < lit for i in range(5))
+
+
+def _phase(now, interval_s, minimum=0.05):
+    """0.0-1.0 sawtooth against a period, floor-guarded so a
+    user-entered-0 interval can't divide by zero."""
+    period = max(minimum, interval_s)
+    return (now % period) / period
+
+
+def _scale_color(color, brightness):
+    return tuple(max(0, min(255, round(c * brightness))) for c in color)
+
+
+def _compute_static_led(cfg, now):
+    return tuple(cfg.get("color", [255, 255, 255])), _bar_mask(5)
+
+
+def _compute_breathing_led(cfg, now):
+    color = cfg.get("color", [255, 255, 255])
+    phase = _phase(now, cfg.get("interval_s", 2.0))
+    brightness = (1 - math.cos(2 * math.pi * phase)) / 2
+    return _scale_color(color, brightness), _bar_mask(5)
+
+
+def _compute_rainbow_led(cfg, now):
+    hue = _phase(now, cfg.get("interval_s", 6.0))
+    r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+    return (round(r * 255), round(g * 255), round(b * 255)), _bar_mask(5)
+
+
+def _compute_wave_led(cfg, now):
+    """A single lit player LED bounces 0->4->0 (an 8-step triangle cycle)
+    rather than a bar - the only way to read as an actual moving "wave" on
+    hardware that only has 5 independent on/off LEDs in a row, no strip."""
+    color = tuple(cfg.get("color", [0, 128, 255]))
+    steps = 8
+    phase = _phase(now, cfg.get("interval_s", 1.0))
+    step = int(phase * steps)
+    position = step if step < 5 else steps - step
+    return color, tuple(i == position for i in range(5))
+
+
+def _compute_heartbeat_led(cfg, now):
+    """Two short pulses ("lub-dub") then a rest, once per interval."""
+    color = tuple(cfg.get("color", [255, 0, 0]))
+    phase = _phase(now, cfg.get("interval_s", 1.2))
+
+    def pulse(center, width):
+        distance = abs(phase - center)
+        return max(0.0, 1 - distance / width) if distance < width else 0.0
+
+    brightness = max(pulse(0.08, 0.08), pulse(0.28, 0.08))
+    return _scale_color(color, brightness), _bar_mask(5)
+
+
+def _compute_battery_led(cfg, battery_pct):
+    pct = 100 if battery_pct is None else battery_pct
+    low_threshold = cfg.get("low_threshold", 25)
+    mid_threshold = cfg.get("mid_threshold", 60)
+    if pct <= low_threshold:
+        rgb = tuple(cfg.get("low_color", [255, 0, 0]))
+    elif pct <= mid_threshold:
+        rgb = tuple(cfg.get("mid_color", [255, 200, 0]))
+    else:
+        rgb = tuple(cfg.get("high_color", [0, 255, 0]))
+    lit = max(1, round(pct / 100 * 5))
+    return rgb, _bar_mask(lit)
+
+
+def _compute_custom_led(cfg, now):
+    """Holds each color solid, then crossfades into the next one over the
+    last fade_s seconds of its slot (fade_s <= 0 is an instant cut, same as
+    before this existed; fade_s >= interval_s crossfades the whole slot,
+    no hold at all)."""
+    colors = cfg.get("colors") or [[255, 255, 255]]
+    interval_s = max(0.05, cfg.get("interval_s", 3.0))
+    n = len(colors)
+    slot = int(now / interval_s)
+    index = slot % n
+    t_in_slot = now - slot * interval_s
+    fade_s = max(0.0, min(cfg.get("fade_s", 0.5), interval_s))
+    hold_s = interval_s - fade_s
+    if fade_s <= 0 or t_in_slot < hold_s:
+        return tuple(colors[index]), _bar_mask(5)
+    next_index = (index + 1) % n
+    fade_phase = (t_in_slot - hold_s) / fade_s
+    rgb = tuple(round(a + (b - a) * fade_phase) for a, b in zip(colors[index], colors[next_index]))
+    return rgb, _bar_mask(5)
+
+
+_LED_PRESET_FUNCS = {
+    "static": _compute_static_led,
+    "breathing": _compute_breathing_led,
+    "rainbow": _compute_rainbow_led,
+    "wave": _compute_wave_led,
+    "heartbeat": _compute_heartbeat_led,
+    "custom": _compute_custom_led,
+}
+
+
+def compute_led_output(led_cfg, now, audio_led=None, battery_pct=None):
+    """The one dispatcher every LED write site (sysfs and BT-proxy report
+    paths alike) calls, regardless of which preset is active. Returns
+    (rgb, player_mask) - rgb an (r, g, b) 0-255 triple, player_mask a
+    5-tuple of bools for the player-indicator LEDs (left to right).
+
+    "immersive" is the only preset driven by live audio (audio_led, the
+    same (bass, mid, treble, bass_priority) tuple led_rgb_and_bar() always
+    took) - its own bass_color/mid_color/treble_color config (falling back
+    to led_rgb_and_bar()'s own BASS_COLOR/MID_COLOR/TREBLE_COLOR constants)
+    overrides which three colors that mix blends, without changing the mix
+    algorithm itself. "battery" is driven by the controller's actual
+    charge (battery_pct, read_battery() in haptics_engine.py). Every other
+    preset is a pure function of elapsed wall-clock time, using modulo
+    arithmetic against its own configured interval - no per-tick smoothing
+    state needed, unlike Immersive's _led_smooth() - and, unlike Immersive,
+    has its own "brightness" (a final multiplier, applied here so every
+    preset's own color math stays simple)."""
+    preset = led_cfg.get("preset", "static")
+    if preset == "immersive":
+        if audio_led is None:
+            return (0, 0, 0), _bar_mask(0)
+        imm_cfg = led_cfg.get("immersive", {})
+        colors = (
+            tuple(imm_cfg.get("bass_color", BASS_COLOR)),
+            tuple(imm_cfg.get("mid_color", MID_COLOR)),
+            tuple(imm_cfg.get("treble_color", TREBLE_COLOR)),
+        )
+        rgb, lit = led_rgb_and_bar(audio_led, colors)
+        return rgb, _bar_mask(lit)
+    if preset == "battery":
+        rgb, mask = _compute_battery_led(led_cfg.get("battery", {}), battery_pct)
+    else:
+        func = _LED_PRESET_FUNCS.get(preset)
+        if func is None:
+            return (0, 0, 0), _bar_mask(0)
+        rgb, mask = func(led_cfg.get(preset, {}), now)
+    brightness = max(0.0, min(1.0, led_cfg.get(preset, {}).get("brightness", 1.0)))
+    rgb = tuple(round(c * brightness) for c in rgb)
+    return rgb, mask
+
+
+def apply_led_visualizer(report, rgb, player_mask):
+    """Bluetooth HID Proxy report-byte variant of write_led_sysfs() (in
+    haptics_engine.py) - both just apply whatever compute_led_output()
+    already decided. Mutates `report` in place; caller still owns
+    recomputing the CRC afterward. See command_lightbar3/
     command_player_leds in dualsensectl's source for the underlying
     protocol this mirrors."""
-    rgb, lit = led_rgb_and_bar(led)
+    lit_bits = sum(1 << i for i, on in enumerate(player_mask) if on)
     report[4] |= LIGHTBAR_CONTROL_FLAG | PLAYER_INDICATOR_CONTROL_FLAG
     report[LIGHTBAR_RGB_FIELD] = bytes(rgb)
-    report[PLAYER_LEDS_FIELD] = ((1 << lit) - 1) | PLAYER_LEDS_INSTANT
+    report[PLAYER_LEDS_FIELD] = lit_bits | PLAYER_LEDS_INSTANT
 
 
-def merge_rumble(base_report, strong, weak, led=None):
+def merge_rumble(base_report, strong, weak, led_output=None):
     """base_report is whatever Steam/the driver last wrote (trigger effects,
     LED, everything) - only the two rumble-motor bytes and the two "select"
     valid-flag bits get overwritten with our own audio-reactive magnitude.
     Ground truth for which bits (HAPTICS_SELECT 0x02, not COMPATIBLE_VIBRATION
     0x01 as dualsensectl's own constant naming misleadingly suggests) came
     from sniffing a real, felt-working kernel FF_RUMBLE write over the air.
-    led, if not None (see apply_led_visualizer() for its shape), also
-    drives the Immersive Lighting visualizer - optional so callers that
-    don't want it (or don't have BT proxy's exclusive device access to
-    safely fight Steam's own lightbar writes) can leave the cached
-    lightbar/LED state untouched."""
+    led_output, if not None (an (rgb, player_mask) pair - see
+    compute_led_output()), also drives the LED indication preset -
+    optional so callers that don't want it (or don't have BT proxy's
+    exclusive device access to safely fight Steam's own lightbar writes)
+    can leave the cached lightbar/LED state untouched."""
     report = bytearray(base_report)
     report[3] |= 0x02   # valid_flag0 |= DS_OUTPUT_VALID_FLAG0_HAPTICS_SELECT
     report[41] |= 0x04  # valid_flag2 |= DS_OUTPUT_VALID_FLAG2_COMPATIBLE_VIBRATION2
     report[6] = max(0, min(255, int(strong * 255)))  # motor_left (strong)
     report[5] = max(0, min(255, int(weak * 255)))    # motor_right (weak)
-    if led is not None:
-        apply_led_visualizer(report, led)
+    if led_output is not None:
+        apply_led_visualizer(report, *led_output)
     body = bytes(report[:-4])
     crc = sony_crc32(OUTPUT_CRC_SEED, body)
     report[-4:] = crc.to_bytes(4, "little")
@@ -904,7 +1056,7 @@ class BtHidProxySession:
             merged[-4:] = sony_crc32(OUTPUT_CRC_SEED, body).to_bytes(4, "little")
         return merged
 
-    def write_rumble(self, strong_mag, weak_mag, led=None):
+    def write_rumble(self, strong_mag, weak_mag, led_output=None):
         """Called at the session's own audio-tick rate (~50Hz) regardless of
         whether the magnitude actually changed since the last tick - skipped
         here, same as forward_trigger_only()'s identical dedup, once envelope
@@ -913,15 +1065,15 @@ class BtHidProxySession:
         on its own, so re-sending it changes nothing on the hardware side.
         Reset on every detach() so a reconnect's first write is never wrongly
         skipped."""
-        merged = merge_rumble(self.last_steam_report, strong_mag, weak_mag, led)
+        merged = merge_rumble(self.last_steam_report, strong_mag, weak_mag, led_output)
         if merged == self._last_rumble_report:
             return
         self._last_rumble_report = merged
         self._write_real_async(merged)
 
-    def forward_trigger_only(self, led=None):
+    def forward_trigger_only(self, led_output=None):
         """Relays ONLY the cached trigger-effect fields (plus, optionally,
-        the Immersive Lighting visualizer - a separate field group gated by
+        the LED indication preset - a separate field group gated by
         its own valid_flag1 bits, so it doesn't touch the motor-arbitration
         conflict described below) to the real device - used when something
         else (SAxense's own, separate HID report) is driving the motors
@@ -941,8 +1093,8 @@ class BtHidProxySession:
             if cached_flag0 & flag:
                 report[3] |= flag
                 report[field] = self.last_steam_report[field]
-        if led is not None:
-            apply_led_visualizer(report, led)
+        if led_output is not None:
+            apply_led_visualizer(report, *led_output)
         body = bytes(report[:-4])
         report[-4:] = sony_crc32(OUTPUT_CRC_SEED, body).to_bytes(4, "little")
         data = bytes(report)

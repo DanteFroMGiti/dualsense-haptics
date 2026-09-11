@@ -25,6 +25,21 @@ def _merge_defaults(cfg, defaults):
     return cfg
 
 
+def _migrate_led_visualizer(cfg):
+    """In place: converts the pre-preset-system "led_visualizer" shape (a
+    lone, always-audio-reactive dict) into the new "led" preset-system
+    shape, carrying the user's own values forward as the "immersive"
+    preset. Must run before _merge_defaults(), which would otherwise treat
+    "led" as simply missing and fill it with fresh defaults, discarding
+    whatever the user actually had. Desktop-only bookkeeping - the Decky
+    plugin's own vendored haptics_engine.py tolerates the old shape
+    directly at runtime instead (see _resolve_led_config() there), since
+    its config isn't touched by this file at all."""
+    old = cfg.pop("led_visualizer", None)
+    if old is not None and "led" not in cfg:
+        cfg["led"] = {"enabled": old.get("enabled", False), "preset": "immersive", "immersive": old}
+
+
 def _default_state():
     return {
         # preset_params() only carries the DSP fields the presets dict
@@ -89,6 +104,7 @@ def load_state():
     if "active" not in raw:
         # Old flat-params format from before presets/profiles existed - keep it
         # as a user profile so nothing from prior tuning gets lost.
+        _migrate_led_visualizer(raw)
         old_params = _merge_defaults(raw, DEFAULT_CONFIG)
         state = _default_state()
         state["active"] = old_params
@@ -97,7 +113,9 @@ def load_state():
         return state
 
     state = _default_state()
-    state["active"] = _merge_defaults(raw.get("active", {}), DEFAULT_CONFIG)
+    raw_active = raw.get("active", {})
+    _migrate_led_visualizer(raw_active)
+    state["active"] = _merge_defaults(raw_active, DEFAULT_CONFIG)
 
     old_bh = state["active"].pop("button_haptic", None)
     if old_bh and old_bh.get("button_code") is not None:
@@ -159,6 +177,7 @@ def load_state():
     state["language"] = raw.get("language", detect_system_language())
     state["sidebar_collapsed"] = raw.get("sidebar_collapsed", False)
     for name, params in state["profiles"].items():
+        _migrate_led_visualizer(params)
         _merge_defaults(params, DEFAULT_CONFIG)
     return state
 

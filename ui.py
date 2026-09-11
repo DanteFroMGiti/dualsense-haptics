@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QGroupBox, QCheckBox, QPushButton, QProgressBar,
     QStackedWidget, QButtonGroup, QRadioButton, QListWidget, QListWidgetItem, QLineEdit,
-    QInputDialog, QMessageBox, QFrame, QScrollArea, QComboBox,
+    QInputDialog, QMessageBox, QFrame, QScrollArea, QComboBox, QColorDialog,
     QGraphicsScene, QGraphicsPixmapItem, QGraphicsBlurEffect, QGraphicsOpacityEffect,
 )
 
@@ -31,6 +31,7 @@ from haptics_engine import (
     LEFT_TRIGGER_VIRTUAL_CODE, RIGHT_TRIGGER_VIRTUAL_CODE,
     BT_CHUNK_MS, BT_CHUNK_MS_CHOICES,
     BUTTON_CLICK_HZ, BUTTON_CLICK_HZ_MIN, BUTTON_CLICK_HZ_MAX,
+    DEFAULT_CONFIG,
 )
 import app_audio_binding
 import bt_hid_proxy
@@ -1499,74 +1500,292 @@ class AdvancedPage(QWidget):
         self.treble_box.refresh()
 
 
+class ColorSwatchButton(QPushButton):
+    """A small color-filled button that opens QColorDialog on click - the
+    one genuinely new UI primitive LED presets need (no color-picker widget
+    existed anywhere in this codebase before)."""
+
+    def __init__(self, rgb, on_change):
+        super().__init__()
+        self.rgb = tuple(rgb)
+        self.on_change = on_change
+        self.setFixedSize(36, 24)
+        self.setToolTip(t("label_led_color"))
+        self._apply_style()
+        self.clicked.connect(self._pick)
+
+    def _apply_style(self):
+        r, g, b = self.rgb
+        self.setStyleSheet(
+            f"background-color: rgb({r},{g},{b}); border: 1px solid rgba(128,128,128,120); border-radius: 4px;")
+
+    def _pick(self):
+        # Parented to the top-level window, not self - Qt's stylesheet
+        # cascade follows the QObject parent chain regardless of the
+        # dialog being its own top-level window, so parenting to this
+        # button directly leaked its own bare "background-color: rgb(...)"
+        # rule (see _apply_style()) into the dialog, making it appear
+        # tinted with whatever color was currently being edited instead of
+        # the app's normal theme background.
+        color = QColorDialog.getColor(QColor(*self.rgb), self.window(), t("label_led_color"))
+        if color.isValid():
+            self.rgb = (color.red(), color.green(), color.blue())
+            self._apply_style()
+            self.on_change(list(self.rgb))
+
+
 class LedPage(QWidget):
+    """A preset picker (radio-button group, one selection at a time -
+    mirrors AppAudioBindingPage's own exclusive-selection pattern) - each
+    row shows its own inline color/interval controls. "Immersive" is the
+    original audio-reactive effect (still requires Trigger + Vibration Mix
+    for exclusive device access, same as before); every other preset is a
+    pure function of time (or, for "Battery", the controller's charge) -
+    see bt_hid_proxy.compute_led_output() for the actual math."""
+
+    _PRESET_ORDER = ["immersive", "static", "breathing", "rainbow", "wave", "heartbeat", "battery", "custom"]
+    _ANIMATED_INTERVAL_RANGES = {"breathing": (0.5, 5.0), "wave": (0.3, 3.0), "heartbeat": (0.5, 3.0)}
+
     def __init__(self, state, on_change):
         super().__init__()
         self.state = state
         self.on_change = on_change
-        active = state["active"]
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(28, 28, 28, 28)
         title = QLabel(t("led_title"))
         title.setProperty("role", "h1")
         outer.addWidget(title)
-        hint = QLabel(t("led_visualizer_hint"))
+        hint = QLabel(t("led_hint"))
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
         outer.addWidget(hint)
 
-        led_cfg = active.get("led_visualizer", {})
-        self.led_visualizer_check = QCheckBox(t("led_visualizer_checkbox"))
-        self.led_visualizer_check.setChecked(led_cfg.get("enabled", False))
-        self.led_visualizer_check.toggled.connect(self._set_led_visualizer_enabled)
-        outer.addWidget(self.led_visualizer_check)
+        self.enable_check = QCheckBox(t("led_enabled_checkbox"))
+        self.enable_check.toggled.connect(self._set_enabled)
+        outer.addWidget(self.enable_check)
 
-        self.led_attack_slider = ParamSlider(
-            t("label_led_attack"), 0.05, 1.0, led_cfg.get("attack", 0.5), 2,
-            t("led_attack_hint"), self._set_led_attack)
-        outer.addWidget(self.led_attack_slider)
-        self.led_release_slider = ParamSlider(
-            t("label_led_release"), 0.01, 0.5, led_cfg.get("release", 0.08), 2,
-            t("led_release_hint"), self._set_led_release)
-        outer.addWidget(self.led_release_slider)
-        self.led_gamma_slider = ParamSlider(
-            t("label_led_gamma"), 0.5, 3.0, led_cfg.get("gamma", 1.8), 1,
-            t("led_gamma_hint"), self._set_led_gamma)
-        outer.addWidget(self.led_gamma_slider)
-        self.led_bass_priority_slider = ParamSlider(
-            t("label_led_bass_priority"), 0.0, 1.0, led_cfg.get("bass_priority", 0.6), 2,
-            t("led_bass_priority_hint"), self._set_led_bass_priority)
-        outer.addWidget(self.led_bass_priority_slider)
+        self.rows_widget = QWidget()
+        self.rows_layout = QVBoxLayout(self.rows_widget)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.rows_widget)
+        outer.addWidget(scroll, 1)
 
-        outer.addStretch(1)
+        self._button_group = None
+        self.refresh()
 
-    def _set_led_visualizer_enabled(self, checked):
-        self.state["active"].setdefault("led_visualizer", {})["enabled"] = checked
-        if self.on_change:
-            self.on_change()
-
-    def _set_led_attack(self, v):
-        self.state["active"].setdefault("led_visualizer", {})["attack"] = v
-
-    def _set_led_release(self, v):
-        self.state["active"].setdefault("led_visualizer", {})["release"] = v
-
-    def _set_led_gamma(self, v):
-        self.state["active"].setdefault("led_visualizer", {})["gamma"] = v
-
-    def _set_led_bass_priority(self, v):
-        self.state["active"].setdefault("led_visualizer", {})["bass_priority"] = v
+    def _led_cfg(self):
+        return self.state["active"].setdefault("led", {})
 
     def refresh(self):
-        led_cfg = self.state["active"].get("led_visualizer", {})
-        self.led_visualizer_check.blockSignals(True)
-        self.led_visualizer_check.setChecked(led_cfg.get("enabled", False))
-        self.led_visualizer_check.blockSignals(False)
-        self.led_attack_slider.set_value(led_cfg.get("attack", 0.5))
-        self.led_release_slider.set_value(led_cfg.get("release", 0.08))
-        self.led_gamma_slider.set_value(led_cfg.get("gamma", 1.8))
-        self.led_bass_priority_slider.set_value(led_cfg.get("bass_priority", 0.6))
+        led_cfg = self._led_cfg()
+        self.enable_check.blockSignals(True)
+        self.enable_check.setChecked(led_cfg.get("enabled", False))
+        self.enable_check.blockSignals(False)
+
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        selected = led_cfg.get("preset", "immersive")
+        self._button_group = QButtonGroup(self)
+        self._button_group.setExclusive(True)
+        for preset_id in self._PRESET_ORDER:
+            self.rows_layout.addWidget(self._make_preset_row(preset_id, led_cfg, selected == preset_id))
+        self.rows_layout.addStretch(1)
+
+    def _make_preset_row(self, preset_id, led_cfg, checked):
+        box = QGroupBox()
+        outer = QVBoxLayout(box)
+        header = QHBoxLayout()
+        radio = QRadioButton(t(f"led_preset_{preset_id}_label"))
+        radio.setChecked(checked)
+        self._button_group.addButton(radio)
+        radio.toggled.connect(lambda is_checked, p=preset_id: self._select_preset(p) if is_checked else None)
+        header.addWidget(radio)
+        header.addStretch(1)
+        reset_btn = QPushButton(t("btn_reset_preset"))
+        reset_btn.clicked.connect(lambda _=False, p=preset_id: self._reset_preset(p))
+        header.addWidget(reset_btn)
+        outer.addLayout(header)
+
+        preset_cfg = led_cfg.setdefault(preset_id, {})
+        controls = self._build_preset_controls(preset_id, preset_cfg)
+        if controls is not None:
+            outer.addWidget(controls)
+        return box
+
+    def _build_preset_controls(self, preset_id, cfg):
+        if preset_id == "immersive":
+            widget = QWidget()
+            layout = QVBoxLayout(widget)
+            layout.setContentsMargins(0, 0, 0, 0)
+            hint = QLabel(t("led_visualizer_hint"))
+            hint.setProperty("role", "hint")
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
+            colors_row = QHBoxLayout()
+            for key, label_key, default in (
+                ("bass_color", "label_led_immersive_bass_color", [255, 0, 0]),
+                ("mid_color", "label_led_immersive_mid_color", [0, 255, 0]),
+                ("treble_color", "label_led_immersive_treble_color", [0, 0, 255]),
+            ):
+                colors_row.addWidget(QLabel(t(label_key)))
+                colors_row.addWidget(ColorSwatchButton(
+                    cfg.get(key, default), lambda rgb, k=key: self._set_preset_color("immersive", k, rgb)))
+            colors_row.addStretch(1)
+            layout.addLayout(colors_row)
+            layout.addWidget(ParamSlider(
+                t("label_led_attack"), 0.05, 1.0, cfg.get("attack", 0.5), 2, t("led_attack_hint"),
+                lambda v: self._set_preset_value("immersive", "attack", v)))
+            layout.addWidget(ParamSlider(
+                t("label_led_release"), 0.01, 0.5, cfg.get("release", 0.08), 2, t("led_release_hint"),
+                lambda v: self._set_preset_value("immersive", "release", v)))
+            layout.addWidget(ParamSlider(
+                t("label_led_gamma"), 0.5, 3.0, cfg.get("gamma", 1.8), 1, t("led_gamma_hint"),
+                lambda v: self._set_preset_value("immersive", "gamma", v)))
+            layout.addWidget(ParamSlider(
+                t("label_led_bass_priority"), 0.0, 1.0, cfg.get("bass_priority", 0.6), 2,
+                t("led_bass_priority_hint"), lambda v: self._set_preset_value("immersive", "bass_priority", v)))
+            return widget
+
+        # Every other preset gets the same trailing brightness slider, so
+        # they all build into one shared widget/layout rather than each
+        # returning its own bespoke structure.
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._add_preset_specific_controls(preset_id, cfg, layout)
+        layout.addWidget(ParamSlider(
+            t("label_led_brightness"), 0.0, 1.0, cfg.get("brightness", 1.0), 2, t("led_brightness_hint"),
+            lambda v, p=preset_id: self._set_preset_value(p, "brightness", v)))
+        return widget
+
+    def _add_preset_specific_controls(self, preset_id, cfg, layout):
+        if preset_id == "static":
+            row = QHBoxLayout()
+            row.addWidget(QLabel(t("label_led_color")))
+            row.addWidget(ColorSwatchButton(
+                cfg.get("color", [255, 255, 255]), lambda rgb: self._set_preset_color("static", "color", rgb)))
+            row.addStretch(1)
+            layout.addLayout(row)
+            return
+
+        if preset_id in self._ANIMATED_INTERVAL_RANGES:
+            color_row = QHBoxLayout()
+            color_row.addWidget(QLabel(t("label_led_color")))
+            color_row.addWidget(ColorSwatchButton(
+                cfg.get("color", [255, 255, 255]),
+                lambda rgb, p=preset_id: self._set_preset_color(p, "color", rgb)))
+            color_row.addStretch(1)
+            layout.addLayout(color_row)
+            lo, hi = self._ANIMATED_INTERVAL_RANGES[preset_id]
+            layout.addWidget(ParamSlider(
+                t("label_led_interval"), lo, hi, cfg.get("interval_s", (lo + hi) / 2), 2, None,
+                lambda v, p=preset_id: self._set_preset_value(p, "interval_s", v)))
+            return
+
+        if preset_id == "rainbow":
+            layout.addWidget(ParamSlider(
+                t("label_led_interval"), 2.0, 20.0, cfg.get("interval_s", 6.0), 1, None,
+                lambda v: self._set_preset_value("rainbow", "interval_s", v)))
+            return
+
+        if preset_id == "battery":
+            colors_row = QHBoxLayout()
+            for key, label_key, default in (
+                ("low_color", "label_led_low_color", [255, 0, 0]),
+                ("mid_color", "label_led_mid_color", [255, 200, 0]),
+                ("high_color", "label_led_high_color", [0, 255, 0]),
+            ):
+                colors_row.addWidget(QLabel(t(label_key)))
+                colors_row.addWidget(ColorSwatchButton(
+                    cfg.get(key, default), lambda rgb, k=key: self._set_preset_color("battery", k, rgb)))
+            colors_row.addStretch(1)
+            layout.addLayout(colors_row)
+            layout.addWidget(ParamSlider(
+                t("label_led_low_threshold"), 0, 100, cfg.get("low_threshold", 25), 0, None,
+                lambda v: self._set_preset_value("battery", "low_threshold", int(v))))
+            layout.addWidget(ParamSlider(
+                t("label_led_mid_threshold"), 0, 100, cfg.get("mid_threshold", 60), 0, None,
+                lambda v: self._set_preset_value("battery", "mid_threshold", int(v))))
+            return
+
+        if preset_id == "custom":
+            self._add_custom_controls(cfg, layout)
+
+    def _add_custom_controls(self, cfg, layout):
+        colors = cfg.setdefault("colors", [[255, 0, 0], [0, 255, 0], [0, 0, 255]])
+        swatches_row = QHBoxLayout()
+        for i, color in enumerate(colors):
+            swatches_row.addWidget(ColorSwatchButton(color, lambda rgb, idx=i: self._set_custom_color(idx, rgb)))
+            remove_btn = QPushButton("✕")
+            remove_btn.setFixedWidth(24)
+            remove_btn.setToolTip(t("btn_remove_color"))
+            remove_btn.setEnabled(len(colors) > 1)
+            remove_btn.clicked.connect(lambda _=False, idx=i: self._remove_custom_color(idx))
+            swatches_row.addWidget(remove_btn)
+        add_btn = QPushButton(t("btn_add_color"))
+        add_btn.setEnabled(len(colors) < 8)
+        add_btn.clicked.connect(self._add_custom_color)
+        swatches_row.addWidget(add_btn)
+        swatches_row.addStretch(1)
+        layout.addLayout(swatches_row)
+        layout.addWidget(ParamSlider(
+            t("label_led_interval"), 0.5, 5.0, cfg.get("interval_s", 3.0), 2, None,
+            lambda v: self._set_preset_value("custom", "interval_s", v)))
+        layout.addWidget(ParamSlider(
+            t("label_led_fade"), 0.0, 3.0, cfg.get("fade_s", 0.5), 2, t("led_fade_hint"),
+            lambda v: self._set_preset_value("custom", "fade_s", v)))
+
+    def _set_enabled(self, checked):
+        self._led_cfg()["enabled"] = checked
+        self.on_change()
+
+    def _select_preset(self, preset_id):
+        self._led_cfg()["preset"] = preset_id
+        self.on_change()
+
+    def _reset_preset(self, preset_id):
+        default = copy.deepcopy(DEFAULT_CONFIG["led"].get(preset_id, {}))
+        self._led_cfg()[preset_id] = default
+        self.on_change()
+        self.refresh()
+
+    def _set_preset_value(self, preset_id, key, value):
+        self._led_cfg().setdefault(preset_id, {})[key] = value
+
+    def _set_preset_color(self, preset_id, key, rgb):
+        # Unlike the sliders above (continuous drags, deliberately not
+        # persisted on every tick - see _set_preset_value), a color pick is
+        # a single discrete action, so it persists immediately just like
+        # the enabled checkbox and preset selection do.
+        self._led_cfg().setdefault(preset_id, {})[key] = list(rgb)
+        self.on_change()
+
+    def _add_custom_color(self):
+        colors = self._led_cfg().setdefault("custom", {}).setdefault("colors", [])
+        if len(colors) < 8:
+            colors.append([255, 255, 255])
+            self.on_change()
+            self.refresh()
+
+    def _remove_custom_color(self, index):
+        colors = self._led_cfg().setdefault("custom", {}).setdefault("colors", [])
+        if len(colors) > 1 and 0 <= index < len(colors):
+            colors.pop(index)
+            self.on_change()
+            self.refresh()
+
+    def _set_custom_color(self, index, rgb):
+        colors = self._led_cfg().setdefault("custom", {}).setdefault("colors", [])
+        if 0 <= index < len(colors):
+            colors[index] = list(rgb)
+            self.on_change()
 
 
 class ExperimentalPage(QWidget):

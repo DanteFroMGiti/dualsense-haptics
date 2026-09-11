@@ -99,17 +99,21 @@ class TestLedRgbAndBar:
 class TestApplyLedVisualizer:
     def test_sets_flags_rgb_and_player_bar(self):
         report = bytearray(bt.DEFAULT_OUTPUT_REPORT)
-        bt.apply_led_visualizer(report, (1.0, 0.0, 0.5, 0.0))
+        rgb, lit = bt.led_rgb_and_bar((1.0, 0.0, 0.5, 0.0))
+        mask = tuple(i < lit for i in range(5))
+        bt.apply_led_visualizer(report, rgb, mask)
         assert report[4] & bt.LIGHTBAR_CONTROL_FLAG
         assert report[4] & bt.PLAYER_INDICATOR_CONTROL_FLAG
         assert bytes(report[bt.LIGHTBAR_RGB_FIELD]) == bytes((255, 0, round(0.5 * 255)))
-        lit = 5  # loudest band is bass at 1.0
+        assert lit == 5  # loudest band is bass at 1.0
         assert report[bt.PLAYER_LEDS_FIELD] == ((1 << lit) - 1) | bt.PLAYER_LEDS_INSTANT
 
     def test_preserves_other_bytes(self):
         report = bytearray(bt.DEFAULT_OUTPUT_REPORT)
         before = bytes(report)
-        bt.apply_led_visualizer(report, (0.0, 0.0, 0.0, 0.6))
+        rgb, lit = bt.led_rgb_and_bar((0.0, 0.0, 0.0, 0.6))
+        mask = tuple(i < lit for i in range(5))
+        bt.apply_led_visualizer(report, rgb, mask)
         changed = {i for i, (a, b) in enumerate(zip(before, report)) if a != b}
         assert changed <= {4, bt.PLAYER_LEDS_FIELD, 47, 48, 49}
 
@@ -146,8 +150,9 @@ class TestMergeRumble:
         assert base == bt.DEFAULT_OUTPUT_REPORT
 
     def test_led_argument_drives_visualizer(self):
-        merged = bt.merge_rumble(bt.DEFAULT_OUTPUT_REPORT, 0.0, 0.0,
-                                 led=(1.0, 0.0, 0.0, 0.6))
+        rgb, lit = bt.led_rgb_and_bar((1.0, 0.0, 0.0, 0.6))
+        mask = tuple(i < lit for i in range(5))
+        merged = bt.merge_rumble(bt.DEFAULT_OUTPUT_REPORT, 0.0, 0.0, led_output=(rgb, mask))
         assert bytes(merged[bt.LIGHTBAR_RGB_FIELD]) == bytes((255, 0, 0))
         assert merged[4] & bt.LIGHTBAR_CONTROL_FLAG
 

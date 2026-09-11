@@ -103,16 +103,50 @@ DEFAULT_CONFIG = {
                       "bt_chunk_ms": BT_CHUNK_MS, "saxense_restart_on_stall": False},
     # Bluetooth only, opt-in - see bt_hid_proxy.py and HapticsEngine._session_bt_proxy.
     "bt_hid_proxy": {"enabled": False},
-    # Requires bt_hid_proxy (exclusive device access to safely fight Steam's
-    # own lightbar/LED writes) - see bt_hid_proxy.apply_led_visualizer().
-    # attack/release/gamma tune _led_smooth() (deliberately separate from
-    # each band's own haptic shape()/ceiling_step() envelopes, which are
-    # tuned for how a hit should *feel* rather than how color should
-    # *look* - confirmed on real hardware that feeding the raw per-tick
-    # haptic magnitude straight into the lightbar read as a flickery
-    # "disco" effect, not mood lighting); bass_priority tunes
-    # bt_hid_proxy.apply_led_visualizer()'s own bass-vs-mid/treble ducking.
-    "led_visualizer": {"enabled": False, "attack": 0.5, "release": 0.08, "gamma": 1.8, "bass_priority": 0.6},
+    # LED indication preset system - see bt_hid_proxy.compute_led_output()
+    # for the actual per-preset color/pattern math (shared by both the
+    # sysfs write_led_sysfs() path here and the Bluetooth HID Proxy's own
+    # report-byte apply_led_visualizer() path). "immersive" is the
+    # original (and, on the Decky plugin, still only) effect - an
+    # audio-reactive lightbar/player-LED visualizer, requiring bt_hid_proxy
+    # on desktop for exclusive device access to safely fight Steam's own
+    # lightbar/LED writes. Its attack/release/gamma tune _led_smooth()
+    # (deliberately separate from each band's own haptic shape()/
+    # ceiling_step() envelopes, tuned for how a hit should *feel* rather
+    # than how color should *look* - confirmed on real hardware that
+    # feeding the raw per-tick haptic magnitude straight into the lightbar
+    # read as a flickery "disco" effect, not mood lighting); bass_priority
+    # tunes compute_led_output()'s own bass-vs-mid/treble color ducking.
+    # Every other preset is a pure function of elapsed time (or, for
+    # "battery", the controller's actual charge) - see
+    # bt_hid_proxy.compute_led_output() for each one's exact math.
+    "led": {
+        "enabled": False,
+        "preset": "immersive",
+        # bass_color/mid_color/treble_color override bt_hid_proxy.py's own
+        # BASS_COLOR/MID_COLOR/TREBLE_COLOR constants (which stay as the
+        # fallback for these three keys) - the additive-mix-with-bass-
+        # priority-ducking algorithm in led_rgb_and_bar() is unchanged,
+        # only which three colors feed it is now configurable.
+        "immersive": {"attack": 0.5, "release": 0.08, "gamma": 1.8, "bass_priority": 0.6,
+                      "bass_color": [255, 0, 0], "mid_color": [0, 255, 0], "treble_color": [0, 0, 255]},
+        # Every preset below has its own "brightness" (0.0-1.0, a final
+        # multiplier applied in compute_led_output() after its own color
+        # math) - deliberately not on "immersive" above, which already has
+        # its own gain-like envelope via master_gain/_led_smooth().
+        "static": {"color": [255, 255, 255], "brightness": 1.0},
+        "breathing": {"color": [255, 255, 255], "interval_s": 2.0, "brightness": 1.0},
+        "rainbow": {"interval_s": 6.0, "brightness": 1.0},
+        "wave": {"color": [0, 128, 255], "interval_s": 1.0, "brightness": 1.0},
+        "heartbeat": {"color": [255, 0, 0], "interval_s": 1.2, "brightness": 1.0},
+        "battery": {"high_color": [0, 255, 0], "mid_color": [255, 200, 0], "low_color": [255, 0, 0],
+                    "mid_threshold": 60, "low_threshold": 25, "brightness": 1.0},
+        # fade_s (capped to interval_s at compute time) is how long the tail
+        # end of each color's slot spends crossfading into the next color,
+        # rather than cutting straight to it.
+        "custom": {"colors": [[255, 0, 0], [0, 255, 0], [0, 0, 255]], "interval_s": 3.0, "fade_s": 0.5,
+                   "brightness": 1.0},
+    },
 }
 
 BUTTON_ATTACK = 0.7
@@ -158,7 +192,7 @@ def _led_smooth(mag, env, attack, release, gamma):
     fades out instead of jittering tick-to-tick; a >1 gamma on top so a
     strong hit reads as a clear, saturated color while ambient/background
     level stays visibly muted rather than a constant wash of color - see
-    DEFAULT_CONFIG's led_visualizer comment for the full rationale."""
+    DEFAULT_CONFIG's "led" comment for the full rationale."""
     env += (mag - env) * (attack if mag > env else release)
     return env, env ** gamma
 
@@ -369,6 +403,10 @@ _PLAYER_LED_RE = re.compile(r".*:white:player-(\d)$")
 # smooth since _led_smooth()'s own attack/release envelope is what actually
 # produces the perceived motion, not the raw write rate.
 LED_WRITE_INTERVAL_S = 0.08
+# Battery charge changes far slower than the LED write cadence above - the
+# "battery" preset only actually reads sysfs this often, reusing the cached
+# value on every other throttled write in between.
+BATTERY_LED_REFRESH_S = 15.0
 
 # Caps how many clone /dev/uhid reports get drained in a single go (see the
 # three call sites below) - draining unconditionally "while readable"
@@ -450,13 +488,13 @@ def find_led_paths(dev):
     return lightbar, players
 
 
-def write_led_sysfs(lightbar, player_paths, led):
-    """Applies led_rgb_and_bar(led) via find_led_paths()'s sysfs files
+def write_led_sysfs(lightbar, player_paths, rgb, player_mask):
+    """Applies an already-computed (rgb, player_mask) - see
+    bt_hid_proxy.compute_led_output() - via find_led_paths()'s sysfs files
     instead of a hidraw report - see find_led_paths() for when/why. Missing
     paths (kernel without LED class support) are silently skipped rather
     than raising, same as a report-byte write would just be a no-op on
     hardware that doesn't support it."""
-    rgb, lit = bt_hid_proxy.led_rgb_and_bar(led)
     if lightbar:
         multi_intensity_path, brightness_path, max_brightness = lightbar
         try:
@@ -473,9 +511,38 @@ def write_led_sysfs(lightbar, player_paths, led):
         if path:
             try:
                 with open(path, "w") as f:
-                    f.write("1" if i < lit else "0")
+                    f.write("1" if player_mask[i] else "0")
             except OSError:
                 pass
+
+
+def _resolve_led_config(cfg):
+    """Returns the "led" preset-system config dict, tolerating the
+    pre-preset-system shape (a lone "led_visualizer" dict, always
+    audio-reactive) so this engine keeps working unmodified wherever it's
+    vendored byte-identical without also getting a matching config
+    migration - namely the Decky plugin (deck-plugin/py_modules/), whose
+    own main.py keeps storing/exposing only the old shape until it gets
+    its own preset UI in a later pass. Desktop's own config.py migrates
+    "led_visualizer" into "led" once, on load (see config.py's
+    load_state()) - this fallback only ever fires for a config that was
+    never migrated."""
+    led = cfg.get("led")
+    if led is not None:
+        return led
+    old = cfg.get("led_visualizer")
+    if old is None:
+        return {}
+    return {"enabled": old.get("enabled", False), "preset": "immersive", "immersive": old}
+
+
+def _led_battery_percent(battery_cache, now):
+    """battery_cache is a 2-element [percent, read_at] list mutated in
+    place, one per session - see BATTERY_LED_REFRESH_S."""
+    if now - battery_cache[1] > BATTERY_LED_REFRESH_S:
+        battery_cache[0], _status = read_battery()
+        battery_cache[1] = now
+    return battery_cache[0]
 
 
 def find_dualsense_sink():
@@ -1139,6 +1206,7 @@ class HapticsEngine(threading.Thread):
         led_update_hz = 1000.0 / CHUNK_MS_DIRECT
         lightbar_path, player_led_paths = find_led_paths(dev)
         led_last_write = 0.0
+        battery_cache = [None, 0.0]
 
         try:
             while (not self._stop_event.is_set() and self.config.get("direct_audio", {}).get("enabled", True)
@@ -1182,9 +1250,11 @@ class HapticsEngine(threading.Thread):
                 left_y, left = lowpass_block(left_in, left_y, cutoff_hz, rate)
                 right_y, right = lowpass_block(right_in, right_y, cutoff_hz, rate)
 
-                led_on = cfg.get("led_visualizer", {}).get("enabled", False)
+                led_cfg = _resolve_led_config(cfg)
+                led_on = led_cfg.get("enabled", False)
+                led_preset = led_cfg.get("preset", "static")
                 led_bass_mag = led_mid_mag = led_treble_mag = 0.0
-                if led_on:
+                if led_on and led_preset == "immersive":
                     # Raw int16-scale (samples[], not the already-normalized
                     # left_in/right_in above) - see _session_bt_direct_audio's
                     # identical block for why: lowpass_block()/peak() normalize
@@ -1230,16 +1300,20 @@ class HapticsEngine(threading.Thread):
                 weak_phase_step = 2 * math.pi * button_weak_hz / rate
 
                 if led_on:
-                    led_cfg = cfg.get("led_visualizer", {})
-                    att, rel, gam = led_cfg.get("attack", 0.5), led_cfg.get("release", 0.08), led_cfg.get("gamma", 1.8)
-                    led_bass_smooth, led_bass_out = _led_smooth(led_bass_mag, led_bass_smooth, att, rel, gam)
-                    led_mid_smooth, led_mid_out = _led_smooth(led_mid_mag, led_mid_smooth, att, rel, gam)
-                    led_treble_smooth, led_treble_out = _led_smooth(led_treble_mag, led_treble_smooth, att, rel, gam)
                     now = time.monotonic()
                     if now - led_last_write > LED_WRITE_INTERVAL_S:
                         led_last_write = now
-                        write_led_sysfs(lightbar_path, player_led_paths,
-                                         (led_bass_out, led_mid_out, led_treble_out, led_cfg.get("bass_priority", 0.6)))
+                        audio_led = None
+                        if led_preset == "immersive":
+                            imm = led_cfg.get("immersive", {})
+                            att, rel, gam = imm.get("attack", 0.5), imm.get("release", 0.08), imm.get("gamma", 1.8)
+                            led_bass_smooth, led_bass_out = _led_smooth(led_bass_mag, led_bass_smooth, att, rel, gam)
+                            led_mid_smooth, led_mid_out = _led_smooth(led_mid_mag, led_mid_smooth, att, rel, gam)
+                            led_treble_smooth, led_treble_out = _led_smooth(led_treble_mag, led_treble_smooth, att, rel, gam)
+                            audio_led = (led_bass_out, led_mid_out, led_treble_out, imm.get("bass_priority", 0.6))
+                        battery_pct = _led_battery_percent(battery_cache, now) if led_preset == "battery" else None
+                        rgb, player_mask = bt_hid_proxy.compute_led_output(led_cfg, now, audio_led, battery_pct)
+                        write_led_sysfs(lightbar_path, player_led_paths, rgb, player_mask)
 
                 frame = [0] * (chunk_samples * 4)
                 peak_left = peak_right = 0.0
@@ -1333,6 +1407,7 @@ class HapticsEngine(threading.Thread):
         led_update_hz = 1000.0 / chunk_ms
         lightbar_path, player_led_paths = find_led_paths(dev)
         led_last_write = 0.0
+        battery_cache = [None, 0.0]
 
         try:
             while (not self._stop_event.is_set() and not self._bt_proxy_should_retry("bluetooth")
@@ -1395,9 +1470,11 @@ class HapticsEngine(threading.Thread):
                 left_in = samples[0::2]
                 right_in = samples[1::2]
 
-                led_on = cfg.get("led_visualizer", {}).get("enabled", False)
+                led_cfg = _resolve_led_config(cfg)
+                led_on = led_cfg.get("enabled", False)
+                led_preset = led_cfg.get("preset", "static")
                 led_bass_mag = led_mid_mag = led_treble_mag = 0.0
-                if led_on:
+                if led_on and led_preset == "immersive":
                     # Raw int16-scale, not normalized - see
                     # _run_bt_proxy_saxense's identical block for why
                     # (lowpass_block()/peak() normalize internally; doing it
@@ -1439,16 +1516,20 @@ class HapticsEngine(threading.Thread):
                 weak_phase_step = 2 * math.pi * button_weak_hz / rate
 
                 if led_on:
-                    led_cfg = cfg.get("led_visualizer", {})
-                    att, rel, gam = led_cfg.get("attack", 0.5), led_cfg.get("release", 0.08), led_cfg.get("gamma", 1.8)
-                    led_bass_smooth, led_bass_out = _led_smooth(led_bass_mag, led_bass_smooth, att, rel, gam)
-                    led_mid_smooth, led_mid_out = _led_smooth(led_mid_mag, led_mid_smooth, att, rel, gam)
-                    led_treble_smooth, led_treble_out = _led_smooth(led_treble_mag, led_treble_smooth, att, rel, gam)
                     now = time.monotonic()
                     if now - led_last_write > LED_WRITE_INTERVAL_S:
                         led_last_write = now
-                        write_led_sysfs(lightbar_path, player_led_paths,
-                                         (led_bass_out, led_mid_out, led_treble_out, led_cfg.get("bass_priority", 0.6)))
+                        audio_led = None
+                        if led_preset == "immersive":
+                            imm = led_cfg.get("immersive", {})
+                            att, rel, gam = imm.get("attack", 0.5), imm.get("release", 0.08), imm.get("gamma", 1.8)
+                            led_bass_smooth, led_bass_out = _led_smooth(led_bass_mag, led_bass_smooth, att, rel, gam)
+                            led_mid_smooth, led_mid_out = _led_smooth(led_mid_mag, led_mid_smooth, att, rel, gam)
+                            led_treble_smooth, led_treble_out = _led_smooth(led_treble_mag, led_treble_smooth, att, rel, gam)
+                            audio_led = (led_bass_out, led_mid_out, led_treble_out, imm.get("bass_priority", 0.6))
+                        battery_pct = _led_battery_percent(battery_cache, now) if led_preset == "battery" else None
+                        rgb, player_mask = bt_hid_proxy.compute_led_output(led_cfg, now, audio_led, battery_pct)
+                        write_led_sysfs(lightbar_path, player_led_paths, rgb, player_mask)
 
                 out = bytearray(chunk_samples * 2)
                 peak_left = peak_right = 0.0
@@ -1598,6 +1679,7 @@ class HapticsEngine(threading.Thread):
         mid_ceil = 0.0
         mid_env = 0.0
         led_bass_smooth = led_mid_smooth = led_treble_smooth = 0.0
+        battery_cache = [None, 0.0]
         button_strong_env = button_weak_env = 0.0
         held_keys = {}
         hat_x = hat_y = 0
@@ -1648,9 +1730,11 @@ class HapticsEngine(threading.Thread):
                         treble_y, treble_ref = lowpass_block(right, treble_y, cfg["treble_cutoff_hz"], RATE)
                         treble_band = [r - t for r, t in zip(right, treble_ref)]
 
-                        led_on = cfg.get("led_visualizer", {}).get("enabled", False)
+                        led_cfg = _resolve_led_config(cfg)
+                        led_on = led_cfg.get("enabled", False)
+                        led_preset = led_cfg.get("preset", "static")
                         mid_mag = 0.0
-                        if led_on:
+                        if led_on and led_preset == "immersive":
                             mid_y, mid_lp = lowpass_block(right, mid_y, cfg["bass_cutoff_hz"], RATE)
                             mid_band = [t - m for t, m in zip(treble_ref, mid_lp)]
                             mid_ceil, mid_delta = ceiling_step(
@@ -1684,15 +1768,20 @@ class HapticsEngine(threading.Thread):
                         strong_mag = min(1.0, strong_mag + button_strong_env)
                         weak_mag = min(1.0, weak_mag + button_weak_env)
 
-                        led = None
+                        led_output = None
                         if led_on:
-                            led_cfg = cfg.get("led_visualizer", {})
-                            att, rel, gam = led_cfg.get("attack", 0.5), led_cfg.get("release", 0.08), led_cfg.get("gamma", 1.8)
-                            led_bass_smooth, led_bass_out = _led_smooth(strong_mag, led_bass_smooth, att, rel, gam)
-                            led_mid_smooth, led_mid_out = _led_smooth(mid_mag, led_mid_smooth, att, rel, gam)
-                            led_treble_smooth, led_treble_out = _led_smooth(weak_mag, led_treble_smooth, att, rel, gam)
-                            led = (led_bass_out, led_mid_out, led_treble_out, led_cfg.get("bass_priority", 0.6))
-                        session.write_rumble(strong_mag, weak_mag, led)
+                            now = time.monotonic()
+                            audio_led = None
+                            if led_preset == "immersive":
+                                imm = led_cfg.get("immersive", {})
+                                att, rel, gam = imm.get("attack", 0.5), imm.get("release", 0.08), imm.get("gamma", 1.8)
+                                led_bass_smooth, led_bass_out = _led_smooth(strong_mag, led_bass_smooth, att, rel, gam)
+                                led_mid_smooth, led_mid_out = _led_smooth(mid_mag, led_mid_smooth, att, rel, gam)
+                                led_treble_smooth, led_treble_out = _led_smooth(weak_mag, led_treble_smooth, att, rel, gam)
+                                audio_led = (led_bass_out, led_mid_out, led_treble_out, imm.get("bass_priority", 0.6))
+                            battery_pct = _led_battery_percent(battery_cache, now) if led_preset == "battery" else None
+                            led_output = bt_hid_proxy.compute_led_output(led_cfg, now, audio_led, battery_pct)
+                        session.write_rumble(strong_mag, weak_mag, led_output)
                         self._emit_levels(strong_mag, weak_mag)
 
                 if session.real_fd in readable:
@@ -1775,6 +1864,7 @@ class HapticsEngine(threading.Thread):
         led_bass_smooth = led_mid_smooth = led_treble_smooth = 0.0
         led_update_hz = 1000.0 / chunk_ms
         led_last_write = 0.0
+        battery_cache = [None, 0.0]
 
         try:
             while (not self._stop_event.is_set() and self.config.get("bt_hid_proxy", {}).get("enabled", False)
@@ -1825,9 +1915,11 @@ class HapticsEngine(threading.Thread):
                         left_in = samples[0::2]
                         right_in = samples[1::2]
 
-                        led_on = cfg.get("led_visualizer", {}).get("enabled", False)
+                        led_cfg = _resolve_led_config(cfg)
+                        led_on = led_cfg.get("enabled", False)
+                        led_preset = led_cfg.get("preset", "static")
                         led_bass_mag = led_mid_mag = led_treble_mag = 0.0
-                        if led_on:
+                        if led_on and led_preset == "immersive":
                             # Deliberately NOT normalized to -1..1 here -
                             # lowpass_block()/peak() (see _run_bt_proxy_
                             # envelope's identical bass/treble computation)
@@ -1899,14 +1991,8 @@ class HapticsEngine(threading.Thread):
                         weak_phase = math.fmod(weak_phase, 2 * math.pi)
 
                         saxense_writer.write(bytes(out))
-                        led = None
+                        led_output = None
                         if led_on:
-                            led_cfg = cfg.get("led_visualizer", {})
-                            att, rel, gam = led_cfg.get("attack", 0.5), led_cfg.get("release", 0.08), led_cfg.get("gamma", 1.8)
-                            led_bass_smooth, led_bass_out = _led_smooth(led_bass_mag, led_bass_smooth, att, rel, gam)
-                            led_mid_smooth, led_mid_out = _led_smooth(led_mid_mag, led_mid_smooth, att, rel, gam)
-                            led_treble_smooth, led_treble_out = _led_smooth(led_treble_mag, led_treble_smooth, att, rel, gam)
-                            led = (led_bass_out, led_mid_out, led_treble_out, led_cfg.get("bass_priority", 0.6))
                             # forward_trigger_only()'s own dedup only helps
                             # once a color stops changing (silence, held
                             # notes) - while music is actively playing the
@@ -1916,14 +2002,26 @@ class HapticsEngine(threading.Thread):
                             # when it matters most. Same time throttle as
                             # write_led_sysfs() (see LED_WRITE_INTERVAL_S) -
                             # already confirmed imperceptible there since
-                            # _led_smooth()'s own envelope is what produces
-                            # the visible motion, not the raw write rate.
+                            # _led_smooth()'s own envelope (for Immersive) or
+                            # the preset's own interval (for everything else)
+                            # is what produces the visible motion, not the
+                            # raw write rate.
                             now = time.monotonic()
                             if now - led_last_write > LED_WRITE_INTERVAL_S:
                                 led_last_write = now
-                                session.forward_trigger_only(led)
+                                audio_led = None
+                                if led_preset == "immersive":
+                                    imm = led_cfg.get("immersive", {})
+                                    att, rel, gam = imm.get("attack", 0.5), imm.get("release", 0.08), imm.get("gamma", 1.8)
+                                    led_bass_smooth, led_bass_out = _led_smooth(led_bass_mag, led_bass_smooth, att, rel, gam)
+                                    led_mid_smooth, led_mid_out = _led_smooth(led_mid_mag, led_mid_smooth, att, rel, gam)
+                                    led_treble_smooth, led_treble_out = _led_smooth(led_treble_mag, led_treble_smooth, att, rel, gam)
+                                    audio_led = (led_bass_out, led_mid_out, led_treble_out, imm.get("bass_priority", 0.6))
+                                battery_pct = _led_battery_percent(battery_cache, now) if led_preset == "battery" else None
+                                led_output = bt_hid_proxy.compute_led_output(led_cfg, now, audio_led, battery_pct)
+                                session.forward_trigger_only(led_output)
                         else:
-                            session.forward_trigger_only(led)
+                            session.forward_trigger_only(led_output)
                         self._emit_levels(peak_left, peak_right)
                 t_after_audio = time.monotonic()
                 audio_dur = t_after_audio - t_select
@@ -2036,6 +2134,7 @@ class HapticsEngine(threading.Thread):
         led_bass_smooth = led_mid_smooth = led_treble_smooth = 0.0
         lightbar_path, player_led_paths = find_led_paths(dev)
         led_last_write = 0.0
+        battery_cache = [None, 0.0]
         button_strong_env = button_weak_env = 0.0
         held_keys = {}
         hat_x = hat_y = 0
@@ -2097,9 +2196,11 @@ class HapticsEngine(threading.Thread):
                 treble_y, treble_ref = lowpass_block(right, treble_y, cfg["treble_cutoff_hz"], RATE)
                 treble_band = [r - t for r, t in zip(right, treble_ref)]
 
-                led_on = cfg.get("led_visualizer", {}).get("enabled", False)
+                led_cfg = _resolve_led_config(cfg)
+                led_on = led_cfg.get("enabled", False)
+                led_preset = led_cfg.get("preset", "static")
                 mid_mag = 0.0
-                if led_on:
+                if led_on and led_preset == "immersive":
                     mid_y, mid_lp = lowpass_block(right, mid_y, cfg["bass_cutoff_hz"], RATE)
                     mid_band = [t - m for t, m in zip(treble_ref, mid_lp)]
                     mid_ceil, mid_delta = ceiling_step(
@@ -2138,16 +2239,20 @@ class HapticsEngine(threading.Thread):
                 weak_mag = min(1.0, weak_mag + button_weak_env)
 
                 if led_on:
-                    led_cfg = cfg.get("led_visualizer", {})
-                    att, rel, gam = led_cfg.get("attack", 0.5), led_cfg.get("release", 0.08), led_cfg.get("gamma", 1.8)
-                    led_bass_smooth, led_bass_out = _led_smooth(strong_mag, led_bass_smooth, att, rel, gam)
-                    led_mid_smooth, led_mid_out = _led_smooth(mid_mag, led_mid_smooth, att, rel, gam)
-                    led_treble_smooth, led_treble_out = _led_smooth(weak_mag, led_treble_smooth, att, rel, gam)
                     now = time.monotonic()
                     if now - led_last_write > LED_WRITE_INTERVAL_S:
                         led_last_write = now
-                        write_led_sysfs(lightbar_path, player_led_paths,
-                                         (led_bass_out, led_mid_out, led_treble_out, led_cfg.get("bass_priority", 0.6)))
+                        audio_led = None
+                        if led_preset == "immersive":
+                            imm = led_cfg.get("immersive", {})
+                            att, rel, gam = imm.get("attack", 0.5), imm.get("release", 0.08), imm.get("gamma", 1.8)
+                            led_bass_smooth, led_bass_out = _led_smooth(strong_mag, led_bass_smooth, att, rel, gam)
+                            led_mid_smooth, led_mid_out = _led_smooth(mid_mag, led_mid_smooth, att, rel, gam)
+                            led_treble_smooth, led_treble_out = _led_smooth(weak_mag, led_treble_smooth, att, rel, gam)
+                            audio_led = (led_bass_out, led_mid_out, led_treble_out, imm.get("bass_priority", 0.6))
+                        battery_pct = _led_battery_percent(battery_cache, now) if led_preset == "battery" else None
+                        rgb, player_mask = bt_hid_proxy.compute_led_output(led_cfg, now, audio_led, battery_pct)
+                        write_led_sysfs(lightbar_path, player_led_paths, rgb, player_mask)
 
                 effect.u.ff_rumble_effect.strong_magnitude = int(strong_mag * 0xFFFF)
                 effect.u.ff_rumble_effect.weak_magnitude = int(weak_mag * 0xFFFF)
