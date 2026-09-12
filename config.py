@@ -14,6 +14,7 @@ AUTOSTART_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 AUTOSTART_FILE = AUTOSTART_DIR / "dualsense-haptics.desktop"
 
 APP_DIR = Path(__file__).resolve().parent
+CONTROLLER_SKINS = ('white', 'black', 'pink', 'blue', 'purple', 'red')
 
 
 def _merge_defaults(cfg, defaults):
@@ -49,6 +50,8 @@ def _default_state():
         "active": _merge_defaults(preset_params("balanced"), DEFAULT_CONFIG),
         "active_ref": "preset:balanced",
         "profiles": {},
+        # Stable user-defined order for draggable profile cards.
+        "profile_order": [],
         "trigger_preset_left": None,
         "trigger_preset_right": None,
         "trigger_custom_left": None,
@@ -87,6 +90,7 @@ def _default_state():
         # the full system ("Global").
         "app_audio_binding_selected": None,
         "theme": "system",
+        "controller_skin": "white",
         "language": detect_system_language(),
         "sidebar_collapsed": False,
     }
@@ -110,6 +114,7 @@ def load_state():
         state["active"] = old_params
         state["active_ref"] = "profile:Мои настройки"
         state["profiles"] = {"Мои настройки": copy.deepcopy(old_params)}
+        state["profile_order"] = ["Мои настройки"]
         return state
 
     state = _default_state()
@@ -128,6 +133,13 @@ def load_state():
 
     state["active_ref"] = raw.get("active_ref", "custom")
     state["profiles"] = raw.get("profiles", {})
+    raw_profile_order = raw.get("profile_order", [])
+    state["profile_order"] = []
+    if isinstance(raw_profile_order, list):
+        for name in raw_profile_order:
+            if (isinstance(name, str) and name in state["profiles"] and
+                    name not in state["profile_order"]):
+                state["profile_order"].append(name)
     if "trigger_preset" in raw:
         # Old single-preset-for-both-sides format - carry it over to both.
         state["trigger_preset_left"] = raw["trigger_preset"]
@@ -174,6 +186,8 @@ def load_state():
         state["app_audio_binding_apps"] = sorted(names)
         state["app_audio_binding_selected"] = selected
     state["theme"] = raw.get("theme", "system")
+    skin = raw.get('controller_skin', 'white')
+    state['controller_skin'] = skin if skin in CONTROLLER_SKINS else 'white'
     state["language"] = raw.get("language", detect_system_language())
     state["sidebar_collapsed"] = raw.get("sidebar_collapsed", False)
     for name, params in state["profiles"].items():

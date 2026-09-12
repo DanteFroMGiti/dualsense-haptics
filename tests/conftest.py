@@ -25,7 +25,7 @@ def _install(name, module):
         try:
             __import__(name)
         except ImportError:
-            sys.modules[name] = module
+            sys.modules[name] = module() if callable(module) else module
 
 
 # --- evdev ------------------------------------------------------------------
@@ -69,7 +69,7 @@ def _make_evdev_stub():
     return evdev
 
 
-_install("evdev", _make_evdev_stub())
+_install("evdev", _make_evdev_stub)
 
 
 # --- Linux-only stdlib (fcntl / pwd / termios) ------------------------------
@@ -160,4 +160,4 @@ def _make_pyside_stub():
     return pyside
 
 
-_install("PySide6", _make_pyside_stub())
+_install("PySide6", _make_pyside_stub)

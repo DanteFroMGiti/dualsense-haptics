@@ -888,6 +888,10 @@ class HapticsEngine(threading.Thread):
         self.status_queue = queue.Queue()
         self.level_queue = queue.Queue(maxsize=1)
         self.connection_queue = queue.Queue(maxsize=1)
+        # Desktop-only, read-only visualization. Replace the entire snapshot
+        # atomically so the GUI never reads dictionaries being mutated here.
+        self.visual_feedback_enabled = False
+        self.visual_state = None
         self._stop_event = threading.Event()
         # Persists across reconnects - see _session_bt_proxy() and
         # _teardown_bt_proxy_session(). Only ever destroyed (not just
@@ -928,6 +932,27 @@ class HapticsEngine(threading.Thread):
             self.level_queue.put_nowait((strong, weak))
         except queue.Full:
             pass
+
+    def _emit_visuals(self, held_keys, analog_scale, led):
+        if not self.visual_feedback_enabled:
+            return
+        held = {code: analog_scale.get(code, 1.0)
+                for code, pressed in held_keys.items() if pressed}
+        feedback = {
+            code: max(0.0, min(1.0, scale * self.config['button_haptics'].get(str(code), {}).get('strength', 0.4)))
+            for code, scale in held.items()
+            if self.config['button_haptics'].get(str(code), {}).get('enabled', False)
+        }
+        if led is None:
+            rgb = None
+        elif (len(led) == 2 and isinstance(led[0], (tuple, list))
+              and len(led[0]) == 3):
+            # v1.10 preset system already supplies ((r, g, b), player_mask).
+            rgb = tuple(led[0])
+        else:
+            # Compatibility with the older immersive-only magnitude tuple.
+            rgb = bt_hid_proxy.led_rgb_and_bar(led)[0]
+        self.visual_state = (time.monotonic(), rgb, held, feedback)
 
     def _emit_connection(self, kind):
         try:
@@ -1206,6 +1231,7 @@ class HapticsEngine(threading.Thread):
         led_update_hz = 1000.0 / CHUNK_MS_DIRECT
         lightbar_path, player_led_paths = find_led_paths(dev)
         led_last_write = 0.0
+        led_visual_output = None
         battery_cache = [None, 0.0]
 
         try:
@@ -1312,7 +1338,9 @@ class HapticsEngine(threading.Thread):
                             led_treble_smooth, led_treble_out = _led_smooth(led_treble_mag, led_treble_smooth, att, rel, gam)
                             audio_led = (led_bass_out, led_mid_out, led_treble_out, imm.get("bass_priority", 0.6))
                         battery_pct = _led_battery_percent(battery_cache, now) if led_preset == "battery" else None
-                        rgb, player_mask = bt_hid_proxy.compute_led_output(led_cfg, now, audio_led, battery_pct)
+                        led_visual_output = bt_hid_proxy.compute_led_output(
+                            led_cfg, now, audio_led, battery_pct)
+                        rgb, player_mask = led_visual_output
                         write_led_sysfs(lightbar_path, player_led_paths, rgb, player_mask)
 
                 frame = [0] * (chunk_samples * 4)
@@ -1339,6 +1367,9 @@ class HapticsEngine(threading.Thread):
 
                 paplay.stdin.write(struct.pack(quad_fmt, *frame))
                 paplay.stdin.flush()
+                self._emit_visuals(
+                    held_keys, analog_scale,
+                    led_visual_output if led_on and lightbar_path else None)
                 self._emit_levels(peak_left, peak_right)
         finally:
             try:
@@ -1407,6 +1438,7 @@ class HapticsEngine(threading.Thread):
         led_update_hz = 1000.0 / chunk_ms
         lightbar_path, player_led_paths = find_led_paths(dev)
         led_last_write = 0.0
+        led_visual_output = None
         battery_cache = [None, 0.0]
 
         try:
@@ -1528,7 +1560,9 @@ class HapticsEngine(threading.Thread):
                             led_treble_smooth, led_treble_out = _led_smooth(led_treble_mag, led_treble_smooth, att, rel, gam)
                             audio_led = (led_bass_out, led_mid_out, led_treble_out, imm.get("bass_priority", 0.6))
                         battery_pct = _led_battery_percent(battery_cache, now) if led_preset == "battery" else None
-                        rgb, player_mask = bt_hid_proxy.compute_led_output(led_cfg, now, audio_led, battery_pct)
+                        led_visual_output = bt_hid_proxy.compute_led_output(
+                            led_cfg, now, audio_led, battery_pct)
+                        rgb, player_mask = led_visual_output
                         write_led_sysfs(lightbar_path, player_led_paths, rgb, player_mask)
 
                 out = bytearray(chunk_samples * 2)
@@ -1554,6 +1588,9 @@ class HapticsEngine(threading.Thread):
                 weak_phase = math.fmod(weak_phase, 2 * math.pi)
 
                 saxense_writer.write(bytes(out))
+                self._emit_visuals(
+                    held_keys, analog_scale,
+                    led_visual_output if led_on and lightbar_path else None)
                 self._emit_levels(peak_left, peak_right)
                 work_dur = time.monotonic() - t_after_read
                 if work_dur > TICK_LOG_THRESHOLD_S:
@@ -1782,6 +1819,7 @@ class HapticsEngine(threading.Thread):
                             battery_pct = _led_battery_percent(battery_cache, now) if led_preset == "battery" else None
                             led_output = bt_hid_proxy.compute_led_output(led_cfg, now, audio_led, battery_pct)
                         session.write_rumble(strong_mag, weak_mag, led_output)
+                        self._emit_visuals(held_keys, analog_scale, led_output)
                         self._emit_levels(strong_mag, weak_mag)
 
                 if session.real_fd in readable:
@@ -1864,6 +1902,7 @@ class HapticsEngine(threading.Thread):
         led_bass_smooth = led_mid_smooth = led_treble_smooth = 0.0
         led_update_hz = 1000.0 / chunk_ms
         led_last_write = 0.0
+        led_visual_output = None
         battery_cache = [None, 0.0]
 
         try:
@@ -2019,9 +2058,12 @@ class HapticsEngine(threading.Thread):
                                     audio_led = (led_bass_out, led_mid_out, led_treble_out, imm.get("bass_priority", 0.6))
                                 battery_pct = _led_battery_percent(battery_cache, now) if led_preset == "battery" else None
                                 led_output = bt_hid_proxy.compute_led_output(led_cfg, now, audio_led, battery_pct)
+                                led_visual_output = led_output
                                 session.forward_trigger_only(led_output)
                         else:
                             session.forward_trigger_only(led_output)
+                        self._emit_visuals(
+                            held_keys, analog_scale, led_visual_output if led_on else None)
                         self._emit_levels(peak_left, peak_right)
                 t_after_audio = time.monotonic()
                 audio_dur = t_after_audio - t_select
@@ -2134,6 +2176,7 @@ class HapticsEngine(threading.Thread):
         led_bass_smooth = led_mid_smooth = led_treble_smooth = 0.0
         lightbar_path, player_led_paths = find_led_paths(dev)
         led_last_write = 0.0
+        led_visual_output = None
         battery_cache = [None, 0.0]
         button_strong_env = button_weak_env = 0.0
         held_keys = {}
@@ -2251,13 +2294,18 @@ class HapticsEngine(threading.Thread):
                             led_treble_smooth, led_treble_out = _led_smooth(weak_mag, led_treble_smooth, att, rel, gam)
                             audio_led = (led_bass_out, led_mid_out, led_treble_out, imm.get("bass_priority", 0.6))
                         battery_pct = _led_battery_percent(battery_cache, now) if led_preset == "battery" else None
-                        rgb, player_mask = bt_hid_proxy.compute_led_output(led_cfg, now, audio_led, battery_pct)
+                        led_visual_output = bt_hid_proxy.compute_led_output(
+                            led_cfg, now, audio_led, battery_pct)
+                        rgb, player_mask = led_visual_output
                         write_led_sysfs(lightbar_path, player_led_paths, rgb, player_mask)
 
                 effect.u.ff_rumble_effect.strong_magnitude = int(strong_mag * 0xFFFF)
                 effect.u.ff_rumble_effect.weak_magnitude = int(weak_mag * 0xFFFF)
                 dev.upload_effect(effect)
                 dev.write(ecodes.EV_FF, effect_id, 1)
+                self._emit_visuals(
+                    held_keys, analog_scale,
+                    led_visual_output if led_on and lightbar_path else None)
                 self._emit_levels(strong_mag, weak_mag)
 
                 now = time.monotonic()

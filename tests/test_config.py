@@ -65,11 +65,24 @@ class TestDefaultState:
 
 
 class TestRoundtrip:
+    @pytest.mark.parametrize('skin', config.CONTROLLER_SKINS)
+    def test_controller_skin_round_trip(self, skin):
+        state = config.load_state()
+        state['controller_skin'] = skin
+        config.save_state(state)
+        assert config.load_state()['controller_skin'] == skin
+
+    @pytest.mark.parametrize('skin', ['unknown', None, [], {}])
+    def test_invalid_controller_skin_falls_back_to_white(self, skin):
+        _write_raw({'active': {}, 'controller_skin': skin})
+        assert config.load_state()['controller_skin'] == 'white'
+
     def test_save_then_load_preserves_state(self):
         state = config.load_state()
         state["active"]["master_gain"] = 1.7
         state["active_ref"] = "custom"
         state["profiles"]["Мой"] = dict(state["active"])
+        state["profile_order"] = ["Мой"]
         state["trigger_preset_left"] = "bow"
         state["trigger_custom_right"] = {"mode": "vibration", "params": {"position": 1}}
         state["theme"] = "dark"
@@ -80,6 +93,7 @@ class TestRoundtrip:
         assert loaded["active"]["master_gain"] == 1.7
         assert loaded["active_ref"] == "custom"
         assert "Мой" in loaded["profiles"]
+        assert loaded["profile_order"] == ["Мой"]
         assert loaded["trigger_preset_left"] == "bow"
         assert loaded["trigger_preset_right"] is None
         assert loaded["trigger_custom_right"] == {"mode": "vibration", "params": {"position": 1}}
