@@ -94,6 +94,32 @@ def test_quick_trigger_routes_only_selected_side_and_saved_parameters(dashboard,
     assert off == ['right']
 
 
+def test_custom_title_bar_exposes_live_status_navigation_and_window_controls(dashboard):
+    from PySide6.QtCore import Qt
+
+    window, engine, app = dashboard
+    assert window.windowFlags() & Qt.FramelessWindowHint
+    assert window.title_bar.version_badge.text() == 'v1.10.0'
+    assert set(window._resize_handles) == {
+        'top', 'bottom', 'left', 'right',
+        'top_left', 'top_right', 'bottom_left', 'bottom_right',
+    }
+
+    window.set_status_text('Подключено', connected=True)
+    window.set_battery_text('78% · разряжается')
+    assert window.title_bar.status_label.text() == 'Подключено'
+    assert window.title_bar.device_pill.property('connected') is True
+    assert window.title_bar.battery_label.text() == '78%'
+
+    window.title_bar.settings_btn.click()
+    assert window.stack.currentWidget() is window.settings_page
+    window.resize(920, 700)
+    window.show()
+    app.processEvents()
+    assert window.title_bar.center_title.isHidden()
+    assert window.title_bar.settings_btn.isVisible()
+
+
 def test_custom_trigger_survives_dashboard_refresh(dashboard):
     window, engine, app = dashboard
     window.state['trigger_preset_left'] = 'custom'

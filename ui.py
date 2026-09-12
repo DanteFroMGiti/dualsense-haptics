@@ -46,6 +46,7 @@ from config import CONTROLLER_SKINS
 from i18n import LANGUAGES
 
 t = i18n.manager.t
+APP_VERSION = "v1.10.0"
 
 # Grouped by physical side of the controller, matching BUTTON_SIDE in
 # haptics_engine.py: left-side buttons vibrate the strong/left motor
@@ -4696,7 +4697,7 @@ class SettingsPage(QWidget):
         app_name = QLabel('DualSense Haptics')
         app_name.setStyleSheet('font-size: 15px; font-weight: 750;')
         about_text.addWidget(app_name)
-        version = QLabel('v1.10.0  ·  Python / PySide6  ·  MIT + MPL-2.0')
+        version = QLabel(f'{APP_VERSION}  ·  Python / PySide6  ·  MIT + MPL-2.0')
         version.setProperty('role', 'hint')
         about_text.addWidget(version)
         description = QLabel(t('home_subtitle'))
@@ -5038,6 +5039,224 @@ class AppAudioBindingPage(QWidget):
 
 # ---------------------------------------------------------------- main window
 
+
+class TitleBatteryIcon(QWidget):
+    """Small theme-aware battery pictogram for the custom title bar."""
+
+    def __init__(self):
+        super().__init__()
+        self._value = None
+        self.setFixedSize(27, 16)
+
+    def set_text(self, text):
+        match = re.search(r"(\d{1,3})\s*%", text)
+        self._value = max(0, min(100, int(match.group(1)))) if match else None
+        self.update()
+
+    def paintEvent(self, event):
+        pal = theme.manager.palette
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        body = QRectF(1, 2, 22, 12)
+        painter.setPen(QPen(QColor(pal["accent_hover"]), 1.4))
+        painter.setBrush(QColor(pal["hero_end"]))
+        painter.drawRoundedRect(body, 2.5, 2.5)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(pal["accent_hover"]))
+        painter.drawRoundedRect(QRectF(24, 5, 2, 6), 1, 1)
+        if self._value is not None:
+            fill = body.adjusted(2.5, 2.5, -2.5, -2.5)
+            fill.setWidth(fill.width() * self._value / 100)
+            painter.setBrush(QColor(pal["good"] if self._value > 20 else pal["bad"]))
+            painter.drawRoundedRect(fill, 1.5, 1.5)
+        painter.end()
+
+
+class WindowTitleBar(QFrame):
+    """Frameless-window chrome with live controller and battery status."""
+
+    settings_requested = Signal()
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.host_window = window
+        self._drag_offset = None
+        self.setObjectName("windowTitleBar")
+        self.setFixedHeight(62)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 8, 10, 8)
+        layout.setSpacing(10)
+
+        self.brand_group = QWidget()
+        brand_layout = QHBoxLayout(self.brand_group)
+        brand_layout.setContentsMargins(0, 0, 0, 0)
+        brand_layout.setSpacing(9)
+        self.brand_icon = QLabel()
+        self.brand_icon.setObjectName("titleBrandIcon")
+        self.brand_icon.setFixedSize(34, 34)
+        self.brand_icon.setAlignment(Qt.AlignCenter)
+        brand_layout.addWidget(self.brand_icon)
+        brand = QLabel("DualSense Haptics")
+        brand.setObjectName("titleBrandText")
+        brand_layout.addWidget(brand)
+        self.version_badge = QLabel(APP_VERSION)
+        self.version_badge.setObjectName("titleVersionBadge")
+        brand_layout.addWidget(self.version_badge)
+        layout.addWidget(self.brand_group)
+        layout.addStretch(1)
+
+        self.center_title = QLabel("DualSense Haptics", self)
+        self.center_title.setObjectName("titleCenterText")
+        self.center_title.setAlignment(Qt.AlignCenter)
+        self.center_title.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout.addStretch(1)
+
+        self.device_pill = QFrame()
+        self.device_pill.setObjectName("titleDevicePill")
+        self.device_pill.setProperty("connected", False)
+        device_layout = QHBoxLayout(self.device_pill)
+        device_layout.setContentsMargins(11, 5, 11, 5)
+        device_layout.setSpacing(7)
+        self.controller_icon = QLabel()
+        self.controller_icon.setObjectName("titleControllerIcon")
+        self.controller_icon.setFixedSize(24, 24)
+        self.controller_icon.setAlignment(Qt.AlignCenter)
+        device_layout.addWidget(self.controller_icon)
+        self.status_dot = QLabel("●")
+        self.status_dot.setObjectName("titleStatusDot")
+        device_layout.addWidget(self.status_dot)
+        self.status_label = QLabel(t("status_searching"))
+        self.status_label.setObjectName("titleStatusText")
+        self.status_label.setMaximumWidth(150)
+        device_layout.addWidget(self.status_label)
+        divider = QFrame()
+        divider.setObjectName("titleDivider")
+        divider.setFrameShape(QFrame.VLine)
+        device_layout.addWidget(divider)
+        self.battery_icon = TitleBatteryIcon()
+        self.battery_icon.setObjectName("titleBatteryIcon")
+        device_layout.addWidget(self.battery_icon)
+        self.battery_label = QLabel("—")
+        self.battery_label.setObjectName("titleBatteryText")
+        device_layout.addWidget(self.battery_label)
+        layout.addWidget(self.device_pill)
+
+        self.settings_btn = self._window_button("⚙", "titleSettingsButton")
+        self.settings_btn.clicked.connect(self.settings_requested)
+        layout.addWidget(self.settings_btn)
+        window_divider = QFrame()
+        window_divider.setObjectName("titleDivider")
+        window_divider.setFrameShape(QFrame.VLine)
+        layout.addWidget(window_divider)
+        self.minimize_btn = self._window_button("−", "titleWindowButton")
+        self.minimize_btn.clicked.connect(window.showMinimized)
+        layout.addWidget(self.minimize_btn)
+        self.maximize_btn = self._window_button("□", "titleWindowButton")
+        self.maximize_btn.clicked.connect(self._toggle_maximized)
+        layout.addWidget(self.maximize_btn)
+        self.close_btn = self._window_button("×", "titleCloseButton")
+        self.close_btn.clicked.connect(window.close)
+        layout.addWidget(self.close_btn)
+        self.refresh_theme()
+
+    @staticmethod
+    def _window_button(text, object_name):
+        button = QPushButton(text)
+        button.setObjectName(object_name)
+        button.setFixedSize(38, 38)
+        return button
+
+    def refresh_theme(self):
+        self.brand_icon.setPixmap(render_emoji_icon("🎮").pixmap(28, 28))
+        self.controller_icon.setPixmap(render_emoji_icon("🎮").pixmap(22, 22))
+        self.battery_icon.update()
+
+    def set_status(self, text, connected=False):
+        self.status_label.setText(text)
+        self.status_label.setToolTip(text)
+        self.device_pill.setProperty("connected", bool(connected))
+        self.device_pill.style().unpolish(self.device_pill)
+        self.device_pill.style().polish(self.device_pill)
+
+    def set_battery(self, text):
+        match = re.search(r"(\d{1,3})\s*%", text)
+        self.battery_label.setText(f"{match.group(1)}%" if match else "—")
+        self.battery_label.setToolTip(text)
+        self.battery_icon.set_text(text)
+
+    def set_compact(self, width):
+        self.center_title.setVisible(width >= 1180)
+        self.version_badge.setVisible(width >= 1030)
+        self._position_center_title()
+
+    def _position_center_title(self):
+        self.center_title.adjustSize()
+        size = self.center_title.sizeHint()
+        self.center_title.setGeometry(
+            (self.width() - size.width()) // 2,
+            (self.height() - size.height()) // 2,
+            size.width(), size.height())
+
+    def resizeEvent(self, event):
+        self._position_center_title()
+        super().resizeEvent(event)
+
+    def update_window_state(self):
+        self.maximize_btn.setText("❐" if self.host_window.isMaximized() else "□")
+
+    def _toggle_maximized(self):
+        if self.host_window.isMaximized():
+            self.host_window.showNormal()
+        else:
+            self.host_window.showMaximized()
+        self.update_window_state()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._toggle_maximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.host_window.frameGeometry().topLeft()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
+            if self.host_window.isMaximized():
+                self.host_window.showNormal()
+                self._drag_offset = QPointF(self.host_window.width() / 2, 24).toPoint()
+            self.host_window.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+
+class WindowResizeHandle(QWidget):
+    """Invisible native resize edge retained after removing system chrome."""
+
+    def __init__(self, window, edges, cursor):
+        super().__init__(window)
+        self.host_window = window
+        self.edges = edges
+        self.setCursor(cursor)
+
+    def mousePressEvent(self, event):
+        handle = self.host_window.windowHandle()
+        if event.button() == Qt.LeftButton and handle is not None:
+            if handle.startSystemResize(self.edges):
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
 class MainWindow(QWidget):
     def __init__(self, state, engine_holder, start_engine_cb, stop_engine_cb, save_cb,
                  capture_source_box=None):
@@ -5055,14 +5274,26 @@ class MainWindow(QWidget):
         self.capture_source_box = capture_source_box if capture_source_box is not None else {}
 
         self.setObjectName("appWindow")
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.setWindowTitle("DualSense Haptics")
         self._apply_window_icon()
         self.resize(1280, 900)
         self.setMinimumSize(920, 640)
 
-        root = QHBoxLayout(self)
+        root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+
+        self.title_bar = WindowTitleBar(self)
+        self.title_bar.settings_requested.connect(lambda: self.show_page("settings"))
+        root.addWidget(self.title_bar)
+
+        body = QWidget()
+        body.setObjectName("windowBody")
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        root.addWidget(body, 1)
 
         self._sidebar_collapsed = self.state.get("sidebar_collapsed", False)
 
@@ -5102,11 +5333,11 @@ class MainWindow(QWidget):
             self.nav_buttons[key] = btn
         sb_layout.addStretch(1)
 
-        root.addWidget(self.sidebar)
+        body_layout.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
         self.stack.setObjectName("pageStack")
-        root.addWidget(self.stack, 1)
+        body_layout.addWidget(self.stack, 1)
 
         self._build_pages()
         self._retranslate_sidebar()
@@ -5115,6 +5346,53 @@ class MainWindow(QWidget):
 
         theme.manager.changed.connect(self._on_theme_changed)
         i18n.manager.changed.connect(self._on_language_changed)
+        self._resize_handles = {
+            "top": WindowResizeHandle(self, Qt.TopEdge, Qt.SizeVerCursor),
+            "bottom": WindowResizeHandle(self, Qt.BottomEdge, Qt.SizeVerCursor),
+            "left": WindowResizeHandle(self, Qt.LeftEdge, Qt.SizeHorCursor),
+            "right": WindowResizeHandle(self, Qt.RightEdge, Qt.SizeHorCursor),
+            "top_left": WindowResizeHandle(
+                self, Qt.TopEdge | Qt.LeftEdge, Qt.SizeFDiagCursor),
+            "top_right": WindowResizeHandle(
+                self, Qt.TopEdge | Qt.RightEdge, Qt.SizeBDiagCursor),
+            "bottom_left": WindowResizeHandle(
+                self, Qt.BottomEdge | Qt.LeftEdge, Qt.SizeBDiagCursor),
+            "bottom_right": WindowResizeHandle(
+                self, Qt.BottomEdge | Qt.RightEdge, Qt.SizeFDiagCursor),
+        }
+        self._position_resize_handles()
+
+    def resizeEvent(self, event):
+        if hasattr(self, "title_bar"):
+            self.title_bar.set_compact(event.size().width())
+        if hasattr(self, "_resize_handles"):
+            self._position_resize_handles()
+        super().resizeEvent(event)
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowStateChange and hasattr(self, "title_bar"):
+            self.title_bar.update_window_state()
+            if hasattr(self, "_resize_handles"):
+                self._position_resize_handles()
+        super().changeEvent(event)
+
+    def _position_resize_handles(self):
+        edge, corner = 6, 10
+        width, height = self.width(), self.height()
+        geometries = {
+            "top": (corner, 0, max(0, width - 2 * corner), edge),
+            "bottom": (corner, height - edge, max(0, width - 2 * corner), edge),
+            "left": (0, corner, edge, max(0, height - 2 * corner)),
+            "right": (width - edge, corner, edge, max(0, height - 2 * corner)),
+            "top_left": (0, 0, corner, corner),
+            "top_right": (width - corner, 0, corner, corner),
+            "bottom_left": (0, height - corner, corner, corner),
+            "bottom_right": (width - corner, height - corner, corner, corner),
+        }
+        visible = not self.isMaximized()
+        for name, handle in self._resize_handles.items():
+            handle.setGeometry(*geometries[name])
+            handle.setVisible(visible)
 
     def _build_pages(self):
         self.home_page = HomePage(
@@ -5192,6 +5470,14 @@ class MainWindow(QWidget):
 
     def _apply_window_icon(self):
         self.setWindowIcon(make_app_icon(theme.manager.palette))
+
+    def set_status_text(self, text, connected=False):
+        self.home_page.set_status_text(text)
+        self.title_bar.set_status(text, connected)
+
+    def set_battery_text(self, text):
+        self.home_page.set_battery_text(text)
+        self.title_bar.set_battery(text)
 
     def _quick_trigger(self, preset_id, side):
         if preset_id is None:
@@ -5377,6 +5663,7 @@ class MainWindow(QWidget):
     def _on_theme_changed(self):
         QApplication.instance().setStyleSheet(theme.manager.stylesheet())
         self._apply_window_icon()
+        self.title_bar.refresh_theme()
         self._apply_sidebar_toggle_icon()
         for key, _label_key, icon_char in NAV_ITEMS:
             self.nav_buttons[key].setIcon(render_emoji_icon(icon_char))
@@ -5497,8 +5784,13 @@ class TrayApp:
         self.tray.setIcon(make_app_icon(theme.manager.palette, self._icon_status))
 
     def _retranslate(self):
-        self.status_action.setText(self._status_display_text())
-        self.battery_action.setText(self._battery_display_text())
+        status_text = self._status_display_text()
+        battery_text = self._battery_display_text()
+        self.status_action.setText(status_text)
+        self.battery_action.setText(battery_text)
+        self.main_window.set_status_text(
+            status_text, not self._disabled and self._status_kind in ("connected", "proxied"))
+        self.main_window.set_battery_text(battery_text)
         self.toggle_action.setText(t("tray_disable_vibration") if not self._disabled else t("tray_enable_vibration"))
         self.open_action.setText(t("tray_open"))
         self.quit_action.setText(t("tray_quit"))
@@ -5513,6 +5805,8 @@ class TrayApp:
         }.get(self._status_kind, "searching")
         self._refresh_icon()
         self.status_action.setText(self._status_display_text())
+        self.main_window.set_status_text(
+            self._status_display_text(), enabled and self._status_kind in ("connected", "proxied"))
         self._update_tooltip()
 
     def _poll_status(self):
@@ -5550,7 +5844,8 @@ class TrayApp:
 
         text = self._status_display_text()
         self.status_action.setText(text)
-        self.main_window.home_page.set_status_text(text)
+        self.main_window.set_status_text(
+            text, status in ("connected", "proxied"))
         self._update_tooltip()
 
         if status == "connected" and self._last_status != "connected":
@@ -5564,10 +5859,10 @@ class TrayApp:
         self._battery_raw_status = status
         if percent is None:
             self.battery_action.setText(t("tray_battery_missing"))
-            self.main_window.home_page.set_battery_text(t("battery_unknown"))
+            self.main_window.set_battery_text(t("battery_unknown"))
             return
         self.battery_action.setText(self._battery_display_text())
-        self.main_window.home_page.set_battery_text(f"{percent}% · {self._battery_status_localized()}")
+        self.main_window.set_battery_text(f"{percent}% · {self._battery_status_localized()}")
 
     def _quit(self):
         self.stop_engine_cb()

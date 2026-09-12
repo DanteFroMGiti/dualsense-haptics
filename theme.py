@@ -72,7 +72,42 @@ QWidget {{
     background: {p['bg']}; color: {p['fg']}; font-family: "Inter", "Segoe UI", sans-serif;
     font-size: 13px;
 }}
-QWidget#appWindow {{ background: {p['bg']}; }}
+QWidget#appWindow {{ background: {p['bg']}; border: 1px solid {p['accent']}; }}
+QWidget#windowBody {{ background: transparent; }}
+QFrame#windowTitleBar {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {p['bg_sidebar']}, stop:0.5 {p['active_card']}, stop:1 {p['bg_sidebar']});
+    border: none; border-bottom: 1px solid {p['accent']};
+}}
+QFrame#windowTitleBar QWidget {{ background: transparent; }}
+QLabel#titleBrandText, QLabel#titleCenterText {{ color: {p['fg']}; font-weight: 800; }}
+QLabel#titleBrandText {{ font-size: 14px; }}
+QLabel#titleCenterText {{ font-size: 15px; }}
+QLabel#titleVersionBadge {{
+    color: {p['accent_hover']}; background: {p['pressed']}; border: 1px solid {p['border']};
+    border-radius: 12px; padding: 4px 9px; font-size: 10px; font-weight: 700;
+}}
+QFrame#titleDevicePill {{
+    background: {p['hero_end']}; border: 1px solid {p['border']}; border-radius: 18px;
+}}
+QFrame#titleDevicePill[connected="true"] {{ border-color: {p['accent']}; }}
+QFrame#titleDevicePill QWidget {{ background: transparent; }}
+QLabel#titleControllerIcon {{ color: {p['accent_hover']}; font-size: 18px; }}
+QLabel#titleStatusDot {{ color: {p['fg_dim']}; font-size: 11px; }}
+QFrame#titleDevicePill[connected="true"] QLabel#titleStatusDot {{ color: {p['good']}; }}
+QLabel#titleStatusText {{ color: {p['fg_dim']}; font-size: 11px; font-weight: 700; }}
+QFrame#titleDevicePill[connected="true"] QLabel#titleStatusText {{ color: {p['good']}; }}
+QLabel#titleBatteryIcon {{ color: {p['accent_hover']}; font-size: 18px; font-weight: 800; }}
+QLabel#titleBatteryText {{ color: {p['fg_dim']}; font-size: 11px; font-weight: 700; }}
+QFrame#titleDivider {{ background: {p['border']}; border: none; min-width: 1px; max-width: 1px; }}
+QPushButton#titleSettingsButton, QPushButton#titleWindowButton, QPushButton#titleCloseButton {{
+    color: {p['fg_dim']}; background: transparent; border: none; border-radius: 8px;
+    padding: 0; font-size: 18px; font-weight: 500;
+}}
+QPushButton#titleSettingsButton:hover, QPushButton#titleWindowButton:hover {{
+    color: {p['fg']}; background: {p['pressed']};
+}}
+QPushButton#titleCloseButton:hover {{ color: #ffffff; background: {p['bad']}; }}
 QWidget#sidebar {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
         stop:0 {p['bg_sidebar']}, stop:0.72 {p['bg_sidebar']}, stop:1 {p['pressed']});
