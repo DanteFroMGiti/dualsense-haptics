@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication
 from haptics_engine import HapticsEngine
 from config import load_state, save_state
 from ui import MainWindow, TrayApp, install_press_animations
+from single_instance import SingleInstanceGuard
 import app_audio_binding
 import bt_hid_proxy
 import theme
@@ -20,6 +21,14 @@ def main():
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    # Refuse to run a second copy - it would otherwise fight an already-
+    # running instance over exclusive controller access. Checked before any
+    # of that hardware setup below.
+    guard = SingleInstanceGuard()
+    if not guard.try_acquire(request_show=not args.tray):
+        return
+    app.aboutToQuit.connect(guard.release)
 
     bt_hid_proxy.recover_stale_lock()
 
@@ -72,6 +81,7 @@ def main():
         stop_engine_cb=stop_engine,
         engine_holder=lambda: engine_box["engine"],
     )
+    guard.show_requested.connect(tray._open_window)
 
     if not args.tray:
         tray._open_window()
