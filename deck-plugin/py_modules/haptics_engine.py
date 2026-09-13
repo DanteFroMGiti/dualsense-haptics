@@ -943,15 +943,7 @@ class HapticsEngine(threading.Thread):
             for code, scale in held.items()
             if self.config['button_haptics'].get(str(code), {}).get('enabled', False)
         }
-        if led is None:
-            rgb = None
-        elif (len(led) == 2 and isinstance(led[0], (tuple, list))
-              and len(led[0]) == 3):
-            # v1.10 preset system already supplies ((r, g, b), player_mask).
-            rgb = tuple(led[0])
-        else:
-            # Compatibility with the older immersive-only magnitude tuple.
-            rgb = bt_hid_proxy.led_rgb_and_bar(led)[0]
+        rgb = tuple(led[0]) if led is not None else None
         self.visual_state = (time.monotonic(), rgb, held, feedback)
 
     def _emit_connection(self, kind):

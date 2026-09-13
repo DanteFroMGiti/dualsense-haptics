@@ -1,6 +1,9 @@
 # Maintainer: local build, not published
 pkgname=dualsense-haptics
-pkgver=1.11.0
+# The single source of truth for the version is the repo-root VERSION file -
+# ui.py's title-bar badge reads the same file at runtime, so the two can
+# never drift the way the hardcoded APP_VERSION string used to.
+pkgver=$(cat "$(dirname "${BASH_SOURCE[0]}")/../VERSION")
 pkgrel=1
 pkgdesc="Audio-to-haptics daemon and GUI for the DualSense controller over USB or Bluetooth"
 # Ships a compiled helper (dualsense-hidlock, for the Bluetooth HID Proxy
@@ -28,6 +31,7 @@ package() {
   local appdir="$pkgdir/usr/share/dualsense-haptics"
   install -dm755 "$appdir"
   install -m644 "$startdir"/../*.py "$appdir/"
+  install -m644 "$startdir/../VERSION" "$appdir/VERSION"
 
   install -dm755 "$appdir/assets"
   if [ -d "$startdir/../assets" ]; then

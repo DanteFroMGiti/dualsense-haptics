@@ -46,7 +46,19 @@ from config import CONTROLLER_SKINS
 from i18n import LANGUAGES
 
 t = i18n.manager.t
-APP_VERSION = "v1.10.0"
+
+
+def _read_app_version():
+    """Single source of truth: the repo-root VERSION file, also read by
+    packaging/PKGBUILD for pkgver - keeps the title-bar badge from drifting
+    out of sync with the actual shipped version."""
+    try:
+        return "v" + (Path(__file__).resolve().parent / "VERSION").read_text().strip()
+    except OSError:
+        return "v0.0.0"
+
+
+APP_VERSION = _read_app_version()
 
 # Grouped by physical side of the controller, matching BUTTON_SIDE in
 # haptics_engine.py: left-side buttons vibrate the strong/left motor
@@ -371,6 +383,19 @@ def set_responsive_direction(width, *layouts, breakpoint=900):
     for layout in layouts:
         if layout.direction() != direction:
             layout.setDirection(direction)
+
+
+def make_section_card(layout_cls=QVBoxLayout, margins=(16, 13, 16, 15), spacing=None):
+    """Shared 'sectionCard' QFrame shell every dashboard/settings panel built
+    by hand (QFrame + objectName + layout + margins); only the inner content
+    differs per caller."""
+    card = QFrame()
+    card.setObjectName("sectionCard")
+    layout = layout_cls(card)
+    layout.setContentsMargins(*margins)
+    if spacing is not None:
+        layout.setSpacing(spacing)
+    return card, layout
 
 
 class GamepadWidget(QWidget):
@@ -1850,10 +1875,7 @@ class HomePage(QWidget):
 
         summary_row = QHBoxLayout()
         summary_row.setSpacing(10)
-        active_card = QFrame()
-        active_card.setObjectName("sectionCard")
-        ac_layout = QHBoxLayout(active_card)
-        ac_layout.setContentsMargins(18, 14, 18, 14)
+        active_card, ac_layout = make_section_card(QHBoxLayout, margins=(18, 14, 18, 14))
         profile_icon = QLabel("◈")
         profile_icon.setObjectName("dashboardIcon")
         profile_icon.setAlignment(Qt.AlignCenter)
@@ -1870,10 +1892,7 @@ class HomePage(QWidget):
         ac_layout.addLayout(profile_text, 1)
         summary_row.addWidget(active_card, 2)
 
-        toggle_card = QFrame()
-        toggle_card.setObjectName("sectionCard")
-        tc_layout = QHBoxLayout(toggle_card)
-        tc_layout.setContentsMargins(18, 14, 18, 14)
+        toggle_card, tc_layout = make_section_card(QHBoxLayout, margins=(18, 14, 18, 14))
         action_icon = QLabel("≋")
         action_icon.setObjectName("dashboardIcon")
         action_icon.setAlignment(Qt.AlignCenter)
@@ -1894,11 +1913,7 @@ class HomePage(QWidget):
         tc_layout.addWidget(self.toggle_btn)
         summary_row.addWidget(toggle_card, 3)
 
-        self.autostart_card = QFrame()
-        self.autostart_card.setObjectName("sectionCard")
-        startup_layout = QVBoxLayout(self.autostart_card)
-        startup_layout.setContentsMargins(18, 14, 18, 14)
-        startup_layout.setSpacing(5)
+        self.autostart_card, startup_layout = make_section_card(margins=(18, 14, 18, 14), spacing=5)
         startup_heading = QLabel(t("autostart_checkbox"))
         startup_heading.setProperty("role", "h2")
         startup_heading.setWordWrap(True)
@@ -1914,10 +1929,7 @@ class HomePage(QWidget):
         summary_row.addWidget(self.autostart_card, 1)
         root.addLayout(summary_row)
 
-        trigger_card = QFrame()
-        trigger_card.setObjectName("sectionCard")
-        tg_layout = QVBoxLayout(trigger_card)
-        tg_layout.setContentsMargins(16, 13, 16, 15)
+        trigger_card, tg_layout = make_section_card()
         trigger_header = QHBoxLayout()
         tg_hdr = QLabel(t("home_adaptive_triggers"))
         tg_hdr.setProperty("role", "h2")
@@ -2602,10 +2614,7 @@ class ProfilesPage(QWidget):
         header.addWidget(self.connection_indicator, 0, Qt.AlignTop)
         outer.addLayout(header)
 
-        toolbar = QFrame()
-        toolbar.setObjectName("sectionCard")
-        toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(13, 10, 13, 10)
+        toolbar, toolbar_layout = make_section_card(QHBoxLayout, margins=(13, 10, 13, 10))
         toolbar_title = QLabel("◈  " + t("profiles_title"))
         toolbar_title.setProperty("role", "h2")
         toolbar_layout.addWidget(toolbar_title)
@@ -2623,11 +2632,7 @@ class ProfilesPage(QWidget):
         self.workspace.setContentsMargins(0, 0, 0, 0)
         self.workspace.setSpacing(12)
 
-        list_panel = QFrame()
-        list_panel.setObjectName("sectionCard")
-        list_layout = QVBoxLayout(list_panel)
-        list_layout.setContentsMargins(14, 13, 14, 14)
-        list_layout.setSpacing(9)
+        list_panel, list_layout = make_section_card(margins=(14, 13, 14, 14), spacing=9)
         list_header = QHBoxLayout()
         mine = QLabel(t("profiles_title"))
         mine.setProperty("role", "h2")
@@ -2729,11 +2734,7 @@ class ProfilesPage(QWidget):
         self.workspace.addWidget(self.details_panel, 2)
         outer.addWidget(workspace_widget)
 
-        create_card = QFrame()
-        create_card.setObjectName("sectionCard")
-        create_layout = QVBoxLayout(create_card)
-        create_layout.setContentsMargins(15, 13, 15, 13)
-        create_layout.setSpacing(9)
+        create_card, create_layout = make_section_card(margins=(15, 13, 15, 13), spacing=9)
         create_intro = QHBoxLayout()
         create_icon = QLabel("＋")
         create_icon.setObjectName("profileGlyph")
@@ -4556,18 +4557,18 @@ class ThemePreviewButton(QPushButton):
         preview = QRectF(13, 12, self.width() - 26, 54)
         p.setPen(QPen(QColor(pal['border']), 1))
         if self.theme_name == 'dark':
-            p.setBrush(QColor('#07111f'))
+            p.setBrush(QColor(theme.DARK['bg']))
             p.drawRoundedRect(preview, 7, 7)
-            p.fillRect(QRectF(preview.x(), preview.y(), preview.width() * .23, preview.height()), QColor('#0a1423'))
+            p.fillRect(QRectF(preview.x(), preview.y(), preview.width() * .23, preview.height()), QColor(theme.DARK['bg_sidebar']))
         elif self.theme_name == 'light':
-            p.setBrush(QColor('#eef4fb'))
+            p.setBrush(QColor(theme.LIGHT['bg']))
             p.drawRoundedRect(preview, 7, 7)
-            p.fillRect(QRectF(preview.x(), preview.y(), preview.width() * .23, preview.height()), QColor('#dce9f8'))
+            p.fillRect(QRectF(preview.x(), preview.y(), preview.width() * .23, preview.height()), QColor(theme.LIGHT['pressed']))
         else:
-            p.setBrush(QColor('#eef4fb'))
+            p.setBrush(QColor(theme.LIGHT['bg']))
             p.drawRoundedRect(preview, 7, 7)
-            p.fillRect(QRectF(preview.center().x(), preview.y(), preview.width() / 2, preview.height()), QColor('#07111f'))
-            p.fillRect(QRectF(preview.x(), preview.y(), preview.width() * .18, preview.height()), QColor('#dce9f8'))
+            p.fillRect(QRectF(preview.center().x(), preview.y(), preview.width() / 2, preview.height()), QColor(theme.DARK['bg']))
+            p.fillRect(QRectF(preview.x(), preview.y(), preview.width() * .18, preview.height()), QColor(theme.LIGHT['pressed']))
         accent = QColor(pal['accent'])
         p.setPen(Qt.NoPen)
         p.setBrush(accent)
@@ -4847,10 +4848,7 @@ class AppAudioBindingPage(QWidget):
         enable_layout.addLayout(enable_text, 1)
         main_layout.addWidget(enable_card)
 
-        add_card = QFrame()
-        add_card.setObjectName("sectionCard")
-        add_layout = QVBoxLayout(add_card)
-        add_layout.setContentsMargins(15, 12, 15, 14)
+        add_card, add_layout = make_section_card(margins=(15, 12, 15, 14))
         add_title = QLabel(t("app_audio_add_title"))
         add_title.setProperty("role", "h2")
         add_layout.addWidget(add_title)
@@ -4870,10 +4868,7 @@ class AppAudioBindingPage(QWidget):
         add_layout.addLayout(add_row)
         main_layout.addWidget(add_card)
 
-        linked_card = QFrame()
-        linked_card.setObjectName("sectionCard")
-        linked_layout = QVBoxLayout(linked_card)
-        linked_layout.setContentsMargins(15, 13, 15, 15)
+        linked_card, linked_layout = make_section_card(margins=(15, 13, 15, 15))
         linked_header = QHBoxLayout()
         linked_title = QLabel(t("app_audio_linked_title"))
         linked_title.setProperty("role", "h2")
@@ -5220,6 +5215,21 @@ class WindowTitleBar(QFrame):
         super().mousePressEvent(event)
 
 
+# One source of truth for the 8 frameless-window resize edges: each handle's
+# own `edges` bitmask also drives its geometry formula in
+# MainWindow._position_resize_handles, instead of a second parallel dict.
+RESIZE_EDGE_SPECS = {
+    "top": (Qt.TopEdge, Qt.SizeVerCursor),
+    "bottom": (Qt.BottomEdge, Qt.SizeVerCursor),
+    "left": (Qt.LeftEdge, Qt.SizeHorCursor),
+    "right": (Qt.RightEdge, Qt.SizeHorCursor),
+    "top_left": (Qt.TopEdge | Qt.LeftEdge, Qt.SizeFDiagCursor),
+    "top_right": (Qt.TopEdge | Qt.RightEdge, Qt.SizeBDiagCursor),
+    "bottom_left": (Qt.BottomEdge | Qt.LeftEdge, Qt.SizeBDiagCursor),
+    "bottom_right": (Qt.BottomEdge | Qt.RightEdge, Qt.SizeFDiagCursor),
+}
+
+
 class WindowResizeHandle(QWidget):
     """Invisible native resize edge retained after removing system chrome."""
 
@@ -5329,18 +5339,8 @@ class MainWindow(QWidget):
         theme.manager.changed.connect(self._on_theme_changed)
         i18n.manager.changed.connect(self._on_language_changed)
         self._resize_handles = {
-            "top": WindowResizeHandle(self, Qt.TopEdge, Qt.SizeVerCursor),
-            "bottom": WindowResizeHandle(self, Qt.BottomEdge, Qt.SizeVerCursor),
-            "left": WindowResizeHandle(self, Qt.LeftEdge, Qt.SizeHorCursor),
-            "right": WindowResizeHandle(self, Qt.RightEdge, Qt.SizeHorCursor),
-            "top_left": WindowResizeHandle(
-                self, Qt.TopEdge | Qt.LeftEdge, Qt.SizeFDiagCursor),
-            "top_right": WindowResizeHandle(
-                self, Qt.TopEdge | Qt.RightEdge, Qt.SizeBDiagCursor),
-            "bottom_left": WindowResizeHandle(
-                self, Qt.BottomEdge | Qt.LeftEdge, Qt.SizeBDiagCursor),
-            "bottom_right": WindowResizeHandle(
-                self, Qt.BottomEdge | Qt.RightEdge, Qt.SizeFDiagCursor),
+            name: WindowResizeHandle(self, edges, cursor)
+            for name, (edges, cursor) in RESIZE_EDGE_SPECS.items()
         }
         self._position_resize_handles()
 
@@ -5361,21 +5361,26 @@ class MainWindow(QWidget):
         super().changeEvent(event)
 
     def _position_resize_handles(self):
+        """Derive each handle's rectangle from its own edges bitmask, so the
+        edge list (RESIZE_EDGE_SPECS) stays the only place naming the 8
+        handles - no second dict of geometries to keep in sync with it."""
         edge, corner = 6, 10
         width, height = self.width(), self.height()
-        geometries = {
-            "top": (corner, 0, max(0, width - 2 * corner), edge),
-            "bottom": (corner, height - edge, max(0, width - 2 * corner), edge),
-            "left": (0, corner, edge, max(0, height - 2 * corner)),
-            "right": (width - edge, corner, edge, max(0, height - 2 * corner)),
-            "top_left": (0, 0, corner, corner),
-            "top_right": (width - corner, 0, corner, corner),
-            "bottom_left": (0, height - corner, corner, corner),
-            "bottom_right": (width - corner, height - corner, corner, corner),
-        }
         visible = not self.isMaximized()
-        for name, handle in self._resize_handles.items():
-            handle.setGeometry(*geometries[name])
+        for handle in self._resize_handles.values():
+            top = bool(handle.edges & Qt.TopEdge)
+            left = bool(handle.edges & Qt.LeftEdge)
+            vertical_only = bool(handle.edges & (Qt.TopEdge | Qt.BottomEdge)) and \
+                not (handle.edges & (Qt.LeftEdge | Qt.RightEdge))
+            horizontal_only = bool(handle.edges & (Qt.LeftEdge | Qt.RightEdge)) and \
+                not (handle.edges & (Qt.TopEdge | Qt.BottomEdge))
+            if vertical_only:
+                geometry = (corner, 0 if top else height - edge, max(0, width - 2 * corner), edge)
+            elif horizontal_only:
+                geometry = (0 if left else width - edge, corner, edge, max(0, height - 2 * corner))
+            else:
+                geometry = (0 if left else width - corner, 0 if top else height - corner, corner, corner)
+            handle.setGeometry(*geometry)
             handle.setVisible(visible)
 
     def _build_pages(self):

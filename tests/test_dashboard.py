@@ -5,7 +5,6 @@ import time
 
 import pytest
 
-import bt_hid_proxy
 from config import _default_state
 from haptics_engine import HapticsEngine, DPAD_VIRTUAL_CODE, LEFT_STICK_VIRTUAL_CODE
 from evdev import ecodes as ec
@@ -22,20 +21,18 @@ def test_visual_snapshot_filters_disabled_buttons_and_preserves_config():
     before = copy.deepcopy(cfg)
     engine = HapticsEngine(cfg)
     held = {ec.BTN_SOUTH: True, ec.BTN_EAST: True, LEFT_STICK_VIRTUAL_CODE: True}
-    led = (.5, .2, .7, .6)
+    led = ((128, 51, 179), (True, True, False, False, False))
     engine._emit_visuals(held, {LEFT_STICK_VIRTUAL_CODE: .5}, led)
     assert engine.visual_state is None  # Headless use does no telemetry work.
     engine.visual_feedback_enabled = True
     engine._emit_visuals(held, {LEFT_STICK_VIRTUAL_CODE: .5}, led)
     snapshot = engine.visual_state
-    assert snapshot[1] == bt_hid_proxy.led_rgb_and_bar(led)[0]
+    assert snapshot[1] == (128, 51, 179)
     assert snapshot[3] == {ec.BTN_SOUTH: .8, LEFT_STICK_VIRTUAL_CODE: .3}
     held.clear()
     assert snapshot[2][ec.BTN_SOUTH] == 1
     engine._emit_visuals({}, {}, None)
     assert engine.visual_state[1:] == (None, {}, {})
-    engine._emit_visuals({}, {}, ((12, 80, 220), (True, False, False, False, False)))
-    assert engine.visual_state[1] == (12, 80, 220)
     assert cfg == before
 
 
@@ -95,11 +92,15 @@ def test_quick_trigger_routes_only_selected_side_and_saved_parameters(dashboard,
 
 
 def test_custom_title_bar_exposes_live_status_navigation_and_window_controls(dashboard):
+    import re
+
+    import ui
     from PySide6.QtCore import Qt
 
     window, engine, app = dashboard
     assert window.windowFlags() & Qt.FramelessWindowHint
-    assert window.title_bar.version_badge.text() == 'v1.10.0'
+    assert window.title_bar.version_badge.text() == ui.APP_VERSION
+    assert re.fullmatch(r'v\d+\.\d+\.\d+', ui.APP_VERSION)
     assert set(window._resize_handles) == {
         'top', 'bottom', 'left', 'right',
         'top_left', 'top_right', 'bottom_left', 'bottom_right',
