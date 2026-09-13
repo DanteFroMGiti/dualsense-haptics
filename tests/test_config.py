@@ -65,6 +65,18 @@ class TestDefaultState:
 
 
 class TestRoundtrip:
+    @pytest.mark.parametrize('skin', config.CONTROLLER_SKINS)
+    def test_controller_skin_round_trip(self, skin):
+        state = config.load_state()
+        state['controller_skin'] = skin
+        config.save_state(state)
+        assert config.load_state()['controller_skin'] == skin
+
+    @pytest.mark.parametrize('skin', ['unknown', None, [], {}])
+    def test_invalid_controller_skin_falls_back_to_white(self, skin):
+        _write_raw({'active': {}, 'controller_skin': skin})
+        assert config.load_state()['controller_skin'] == 'white'
+
     def test_save_then_load_preserves_state(self):
         state = config.load_state()
         state["active"]["master_gain"] = 1.7
@@ -80,6 +92,7 @@ class TestRoundtrip:
         assert loaded["active"]["master_gain"] == 1.7
         assert loaded["active_ref"] == "custom"
         assert "Мой" in loaded["profiles"]
+        assert list(loaded["profiles"]) == ["Мой"]
         assert loaded["trigger_preset_left"] == "bow"
         assert loaded["trigger_preset_right"] is None
         assert loaded["trigger_custom_right"] == {"mode": "vibration", "params": {"position": 1}}
@@ -105,6 +118,16 @@ class TestRoundtrip:
 
 
 class TestLegacyMigrations:
+    def test_profile_order_is_folded_into_ordered_profile_dict(self):
+        _write_raw({
+            "active": {},
+            "profiles": {"Alpha": {}, "Beta": {}, "Gamma": {}},
+            "profile_order": ["Gamma", "Alpha", "missing", "Gamma"],
+        })
+        state = config.load_state()
+        assert list(state["profiles"]) == ["Gamma", "Alpha", "Beta"]
+        assert "profile_order" not in state
+
     def test_flat_params_become_a_named_profile(self):
         # the original pre-presets format: engine params at the top level
         _write_raw({"master_gain": 1.4, "bass": {"gamma": 2.0}})
