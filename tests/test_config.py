@@ -82,7 +82,6 @@ class TestRoundtrip:
         state["active"]["master_gain"] = 1.7
         state["active_ref"] = "custom"
         state["profiles"]["Мой"] = dict(state["active"])
-        state["profile_order"] = ["Мой"]
         state["trigger_preset_left"] = "bow"
         state["trigger_custom_right"] = {"mode": "vibration", "params": {"position": 1}}
         state["theme"] = "dark"
@@ -93,7 +92,7 @@ class TestRoundtrip:
         assert loaded["active"]["master_gain"] == 1.7
         assert loaded["active_ref"] == "custom"
         assert "Мой" in loaded["profiles"]
-        assert loaded["profile_order"] == ["Мой"]
+        assert list(loaded["profiles"]) == ["Мой"]
         assert loaded["trigger_preset_left"] == "bow"
         assert loaded["trigger_preset_right"] is None
         assert loaded["trigger_custom_right"] == {"mode": "vibration", "params": {"position": 1}}
@@ -119,6 +118,16 @@ class TestRoundtrip:
 
 
 class TestLegacyMigrations:
+    def test_profile_order_is_folded_into_ordered_profile_dict(self):
+        _write_raw({
+            "active": {},
+            "profiles": {"Alpha": {}, "Beta": {}, "Gamma": {}},
+            "profile_order": ["Gamma", "Alpha", "missing", "Gamma"],
+        })
+        state = config.load_state()
+        assert list(state["profiles"]) == ["Gamma", "Alpha", "Beta"]
+        assert "profile_order" not in state
+
     def test_flat_params_become_a_named_profile(self):
         # the original pre-presets format: engine params at the top level
         _write_raw({"master_gain": 1.4, "bass": {"gamma": 2.0}})

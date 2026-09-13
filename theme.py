@@ -364,8 +364,6 @@ QFrame#profileCard[selected="true"] {{
 }}
 QFrame#profileCard[active="true"] {{ border-color: {p['accent']}; }}
 QFrame#profileCard[selected="true"][active="true"] {{ border: 2px solid {p['accent_hover']}; }}
-QFrame#profileCard[dropTarget="true"] {{ border: 2px solid {p['accent_hover']}; }}
-QFrame#profileCard[dragging="true"] {{ background: {p['pressed']}; border-color: {p['accent']}; }}
 QFrame#profileDetailCard {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
         stop:0 {p['hero_start']}, stop:1 {p['hero_end']});
@@ -447,6 +445,10 @@ QListWidget {{
 }}
 QListWidget::item {{ padding: 11px; border-radius: 8px; }}
 QListWidget::item:selected {{ background: {p['pressed']}; color: {p['fg']}; }}
+QListWidget#profileList {{ background: transparent; border: none; padding: 0; }}
+QListWidget#profileList::item {{ padding: 0; border: none; background: transparent; }}
+QListWidget#profileList::item:selected {{ background: transparent; }}
+QListWidget#profileList::indicator {{ width: 0; height: 0; }}
 QLineEdit {{
     background: {p['bg_card']}; border: 1px solid {p['border']}; border-radius: 9px;
     padding: 10px 12px;

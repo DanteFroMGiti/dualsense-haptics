@@ -186,7 +186,7 @@ def test_app_sound_redesign_distinguishes_selection_from_live_routing(dashboard)
 def test_profiles_redesign_keeps_search_selection_and_actions_working(dashboard, monkeypatch):
     import ui
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QMessageBox, QBoxLayout
+    from PySide6.QtWidgets import QMessageBox, QBoxLayout, QAbstractItemView
 
     window, engine, app = dashboard
     page = window.profiles_page
@@ -195,10 +195,11 @@ def test_profiles_redesign_keeps_search_selection_and_actions_working(dashboard,
     music['master_gain'] = 1.8
     music['led']['enabled'] = True
     music['led']['preset'] = 'rainbow'
-    window.state['profiles'] = {'Музыка': music, 'Сбалансированный': balanced}
+    window.state['profiles'] = {'Сбалансированный': balanced, 'Музыка': music}
     window.state['active_ref'] = 'profile:Сбалансированный'
     page.refresh()
 
+    assert page.list.dragDropMode() == QAbstractItemView.InternalMove
     assert list(page.profile_cards) == ['Сбалансированный', 'Музыка']
     assert page.selected_name == 'Сбалансированный'
     assert page.profile_cards['Сбалансированный'].property('selected') is True
@@ -210,10 +211,12 @@ def test_profiles_redesign_keeps_search_selection_and_actions_working(dashboard,
 
     applied = []
     page.on_apply = applied.append
-    page.profile_cards['Музыка'].activated.emit('Музыка')
+    page._select_profile('Музыка')
     page.apply_btn.click()
     assert applied == ['Музыка']
     assert page.metric_bars['vibration'][0].value() == 72
+    assert any(label.text().endswith('72%')
+               for label in page.profile_cards['Музыка'].findChildren(ui.QLabel))
 
     page.name_edit.setText('Новый профиль')
     page.save_btn.click()
@@ -245,22 +248,106 @@ def test_profiles_can_be_reordered_and_keep_order_through_other_actions(dashboar
     page = window.profiles_page
     params = copy.deepcopy(window.state['active'])
     window.state['profiles'] = {name: copy.deepcopy(params) for name in ('Alpha', 'Beta', 'Gamma')}
-    window.state['profile_order'] = ['Alpha', 'Beta', 'Gamma']
     page.refresh()
 
-    page._move_profile('Gamma', -1)
-    assert window.state['profile_order'] == ['Gamma', 'Alpha', 'Beta']
+    page._store_visible_order(['Gamma', 'Alpha', 'Beta'])
+    page.refresh()
+    assert list(window.state['profiles']) == ['Gamma', 'Alpha', 'Beta']
     assert list(page.profile_cards) == ['Gamma', 'Alpha', 'Beta']
-    assert page.selected_name == 'Gamma'
 
     page._select_profile('Alpha')
     monkeypatch.setattr(ui.QInputDialog, 'getText', lambda *args, **kwargs: ('Renamed', True))
     page._rename_selected()
-    assert window.state['profile_order'] == ['Gamma', 'Renamed', 'Beta']
+    assert list(window.state['profiles']) == ['Gamma', 'Renamed', 'Beta']
 
     page.name_edit.setText('Delta')
     page._save_current()
-    assert window.state['profile_order'] == ['Gamma', 'Renamed', 'Beta', 'Delta']
+    assert list(window.state['profiles']) == ['Gamma', 'Renamed', 'Beta', 'Delta']
+
+
+def test_profile_rename_cannot_overwrite_an_existing_profile(dashboard, monkeypatch):
+    import ui
+
+    window, engine, app = dashboard
+    page = window.profiles_page
+    params = copy.deepcopy(window.state['active'])
+    window.state['profiles'] = {'Alpha': copy.deepcopy(params), 'Beta': copy.deepcopy(params)}
+    page.refresh()
+    page._select_profile('Alpha')
+    warnings = []
+    monkeypatch.setattr(ui.QInputDialog, 'getText', lambda *args, **kwargs: ('Beta', True))
+    monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *args: warnings.append(args))
+
+    page._rename_selected()
+
+    assert list(window.state['profiles']) == ['Alpha', 'Beta']
+    assert page.selected_name == 'Alpha'
+    assert warnings
+
+    page.name_edit.setText('Beta')
+    page._save_current()
+    assert list(window.state['profiles']) == ['Alpha', 'Beta']
+    assert len(warnings) == 2
+
+
+def test_led_parameter_edits_are_persisted(dashboard):
+    from unittest.mock import Mock
+
+    window, engine, app = dashboard
+    page = window.led_page
+    page.on_change = Mock()
+    page._set_led_attack(.33)
+    page._set_led_release(.44)
+    page._set_led_gamma(1.7)
+    page._set_led_bass_priority(.62)
+    page._set_preset_value('static', 'brightness', .75)
+
+    page.on_change.assert_called()
+    assert page.on_change.call_count == 5
+    assert window.state['active']['led']['immersive']['attack'] == .33
+    assert window.state['active']['led']['static']['brightness'] == .75
+
+
+def test_only_visible_page_timers_and_telemetry_are_active(dashboard):
+    window, engine, app = dashboard
+    window.show()
+    app.processEvents()
+    assert window.home_page.meter_timer.isActive()
+    assert not window.button_haptic_page.feedback_timer.isActive()
+    assert engine.visual_feedback_enabled is True
+
+    window.show_page('profiles')
+    app.processEvents()
+    assert window.profiles_page.connection_timer.isActive()
+    assert not window.home_page.meter_timer.isActive()
+    assert engine.visual_feedback_enabled is False
+
+    window.show_page('led')
+    app.processEvents()
+    assert window.led_page.preview_timer.isActive()
+    assert window.led_page.preview_scene.timer.isActive()
+    assert not window.profiles_page.connection_timer.isActive()
+    assert engine.visual_feedback_enabled is True
+
+    window.hide()
+    app.processEvents()
+    assert not any(timer.isActive() for timers in window._managed_page_timers.values()
+                   for timer, _interval in timers)
+    assert engine.visual_feedback_enabled is False
+
+
+def test_visual_pages_tolerate_missing_engine(dashboard):
+    window, engine, app = dashboard
+    window.home_page.engine_holder = lambda: None
+    window.button_haptic_page.engine_holder = lambda: None
+    window.led_page.engine_holder = lambda: None
+
+    window.home_page._poll_meter()
+    window.button_haptic_page._poll_feedback()
+    window.led_page._poll_preview()
+
+    assert window.home_page.gamepad.level == 0
+    assert window.button_haptic_page.gamepad.feedback == {}
 
 
 def test_stale_feedback_and_led_color_are_cleared(dashboard):
@@ -592,6 +679,9 @@ def test_button_page_glows_live_pressed_controls_and_clears_stale_state(dashboar
     feedback = {DPAD_VIRTUAL_CODE: .4, ec.BTN_SOUTH: .3}
     engine.visual_state = (time.monotonic(), None, held, feedback)
     window.home_page.connection_indicator.set_connection('usb')
+    window.show()
+    window.show_page('button_haptic')
+    app.processEvents()
     page._poll_feedback()
     assert engine.visual_feedback_enabled is True
     assert page.gamepad.feedback == held
@@ -748,6 +838,7 @@ def test_controller_finish_syncs_to_every_preview_immediately(dashboard):
     combo.activated.emit(combo.findData('black'))
     previews = window.findChildren(GamepadWidget)
     assert len(previews) >= 4
+    assert len({id(preview._image) for preview in previews}) == 1
     assert all(preview.skin == 'black' for preview in previews)
     assert window.advanced_page.controller_outline.skin == 'black'
     window.save_cb.assert_called_once_with()

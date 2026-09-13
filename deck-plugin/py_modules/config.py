@@ -50,8 +50,6 @@ def _default_state():
         "active": _merge_defaults(preset_params("balanced"), DEFAULT_CONFIG),
         "active_ref": "preset:balanced",
         "profiles": {},
-        # Stable user-defined order for draggable profile cards.
-        "profile_order": [],
         "trigger_preset_left": None,
         "trigger_preset_right": None,
         "trigger_custom_left": None,
@@ -114,7 +112,6 @@ def load_state():
         state["active"] = old_params
         state["active_ref"] = "profile:Мои настройки"
         state["profiles"] = {"Мои настройки": copy.deepcopy(old_params)}
-        state["profile_order"] = ["Мои настройки"]
         return state
 
     state = _default_state()
@@ -132,14 +129,21 @@ def load_state():
         }
 
     state["active_ref"] = raw.get("active_ref", "custom")
-    state["profiles"] = raw.get("profiles", {})
+    profiles = raw.get("profiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+    # Profile dictionaries preserve insertion order.  Older redesign builds
+    # stored a second profile_order list; fold it into the dict once so every
+    # consumer (including the Deck plugin) observes the same order.
     raw_profile_order = raw.get("profile_order", [])
-    state["profile_order"] = []
     if isinstance(raw_profile_order, list):
+        ordered_names = []
         for name in raw_profile_order:
-            if (isinstance(name, str) and name in state["profiles"] and
-                    name not in state["profile_order"]):
-                state["profile_order"].append(name)
+            if isinstance(name, str) and name in profiles and name not in ordered_names:
+                ordered_names.append(name)
+        ordered_names.extend(name for name in profiles if name not in ordered_names)
+        profiles = {name: profiles[name] for name in ordered_names}
+    state["profiles"] = profiles
     if "trigger_preset" in raw:
         # Old single-preset-for-both-sides format - carry it over to both.
         state["trigger_preset_left"] = raw["trigger_preset"]

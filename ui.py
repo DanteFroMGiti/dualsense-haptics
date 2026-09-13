@@ -9,18 +9,18 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     Qt, QTimer, QRectF, QPointF, QSize, QEvent, QObject, QPropertyAnimation, QEasingCurve,
-    Property, Signal, QMimeData,
+    Property, Signal,
 )
 from PySide6.QtGui import (
     QIcon, QPixmap, QImage, QPainter, QColor, QPen, QLinearGradient, QPainterPath, QFont,
-    QRadialGradient, QDrag,
+    QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QWidget, QVBoxLayout, QHBoxLayout, QBoxLayout,
     QLabel, QSlider, QGroupBox, QCheckBox, QPushButton, QProgressBar, QGridLayout,
     QStackedWidget, QButtonGroup, QRadioButton, QListWidget, QListWidgetItem, QLineEdit,
     QInputDialog, QMessageBox, QFrame, QScrollArea, QComboBox, QSizePolicy, QColorDialog,
-    QToolButton,
+    QToolButton, QAbstractItemView,
     QGraphicsScene, QGraphicsPixmapItem, QGraphicsBlurEffect, QGraphicsOpacityEffect,
 )
 
@@ -364,14 +364,38 @@ def _render_blurred(pixmap, radius, padding):
     return result
 
 
+def set_responsive_direction(width, *layouts, breakpoint=900):
+    """Keep the repeated desktop/narrow layout switch consistent."""
+    direction = (QBoxLayout.Direction.TopToBottom
+                 if width < breakpoint else QBoxLayout.Direction.LeftToRight)
+    for layout in layouts:
+        if layout.direction() != direction:
+            layout.setDirection(direction)
+
+
 class GamepadWidget(QWidget):
     """Hero illustration on the home page. Pulses a soft accent glow with
     the live motor levels so the dashboard feels alive, not just decorative.
 
-    Prefers a static image at assets/dualsense.png if present (checked by
-    mtime so dropping/replacing the file works without restarting the app);
-    falls back to a hand-drawn silhouette otherwise. Glow color follows the
-    active theme's accent, cached per (image, size, theme)."""
+    Prefers a static image at assets/dualsense.png and falls back to a
+    hand-drawn silhouette. Expensive image transforms are shared by every
+    preview instead of being rebuilt independently on each paint."""
+
+    _SOURCE_CACHE = {}
+    _FINISH_CACHE = {}
+    _SCALED_CACHE = {}
+    _GLOW_CACHE = {}
+    _LIGHT_MASK_CACHE = {}
+    _LIGHTBAR_CACHE = {}
+    _FEEDBACK_CACHE = {}
+    _BLACK_DETAIL_CACHE = {}
+
+    @staticmethod
+    def _remember(cache, key, value, limit=48):
+        cache[key] = value
+        while len(cache) > limit:
+            cache.pop(next(iter(cache)))
+        return value
 
     def __init__(self):
         super().__init__()
@@ -384,7 +408,6 @@ class GamepadWidget(QWidget):
         self._image_mtime = None
         self.skin = 'white'
         self.light_rgb = DEFAULT_GAMEPAD_LIGHT
-        self._skin_cache = {}
         self._glow_key = None
         self._glow_layers = []  # list of (padding, QPixmap), outermost first
         self._light_mask_key = None
@@ -392,16 +415,23 @@ class GamepadWidget(QWidget):
         self._reload_image()
 
     def set_level(self, level):
+        level = max(0.0, min(1.0, float(level)))
+        changed = abs(level - self.level) >= .002
         self.level = level
-        self.update()
+        if changed:
+            self.update()
 
     def set_feedback(self, feedback):
-        self.feedback = dict(feedback)
-        self.update()
+        feedback = dict(feedback)
+        if feedback != self.feedback:
+            self.feedback = feedback
+            self.update()
 
     def set_skin(self, skin):
-        self.skin = skin if skin in CONTROLLER_FINISHES else 'white'
-        self.update()
+        skin = skin if skin in CONTROLLER_FINISHES else 'white'
+        if skin != self.skin:
+            self.skin = skin
+            self.update()
 
     def set_light_color(self, rgb):
         if rgb is None:
@@ -425,8 +455,9 @@ class GamepadWidget(QWidget):
         """
         if self.skin == 'white':
             return self._image
-        if self.skin in self._skin_cache:
-            return self._skin_cache[self.skin]
+        key = (self._image_mtime, self.skin)
+        if key in self._FINISH_CACHE:
+            return self._FINISH_CACHE[key]
         img = self._image.toImage()
         target = QColor(CONTROLLER_FINISHES[self.skin])
         tint = (target.red(), target.green(), target.blue())
@@ -446,8 +477,7 @@ class GamepadWidget(QWidget):
                        for original, base in zip(channels, tint)]
                 img.setPixelColor(x, y, QColor(*rgb, pixel.alpha()))
         finished = QPixmap.fromImage(img)
-        self._skin_cache[self.skin] = finished
-        return finished
+        return self._remember(self._FINISH_CACHE, key, finished, 16)
 
     def mouseMoveEvent(self, event):
         self._parallax = QPointF((event.position().x() / max(1, self.width()) - 0.5) * 10,
@@ -459,18 +489,19 @@ class GamepadWidget(QWidget):
         self.update()
 
     def _reload_image(self):
-        try:
-            mtime = ASSET_IMAGE_PATH.stat().st_mtime
-        except OSError:
-            self._image = None
-            self._image_mtime = None
-            return
-        if mtime == self._image_mtime:
-            return
-        pixmap = QPixmap(str(ASSET_IMAGE_PATH))
-        self._image = pixmap if not pixmap.isNull() else None
-        self._image_mtime = mtime
-        self._skin_cache.clear()
+        path = str(ASSET_IMAGE_PATH)
+        cached = self._SOURCE_CACHE.get(path)
+        if cached is None:
+            try:
+                mtime = ASSET_IMAGE_PATH.stat().st_mtime
+            except OSError:
+                mtime, pixmap = None, None
+            else:
+                loaded = QPixmap(path)
+                pixmap = loaded if not loaded.isNull() else None
+            cached = (mtime, pixmap)
+            self._SOURCE_CACHE[path] = cached
+        self._image_mtime, self._image = cached
         self._glow_key = None  # force glow layer rebuild for the new image
         self._light_mask_key = None
         self._light_mask = None
@@ -479,17 +510,24 @@ class GamepadWidget(QWidget):
         key = (self._image_mtime, scaled.width(), scaled.height(), theme.manager.name)
         if key == self._glow_key:
             return
-        silhouette = _recolor_silhouette(scaled, QColor(theme.manager.palette["accent"]))
-        self._glow_layers = [
-            (tier["padding"], _render_blurred(silhouette, tier["radius"], tier["padding"]))
-            for tier in GLOW_TIERS
-        ]
+        layers = self._GLOW_CACHE.get(key)
+        if layers is None:
+            silhouette = _recolor_silhouette(scaled, QColor(theme.manager.palette["accent"]))
+            layers = [(tier["padding"], _render_blurred(
+                silhouette, tier["radius"], tier["padding"])) for tier in GLOW_TIERS]
+            self._remember(self._GLOW_CACHE, key, layers, 24)
+        self._glow_layers = layers
         self._glow_key = key
 
     def _ensure_light_mask(self, scaled):
         """Cache the original asset's blue light-strip pixels as an alpha mask."""
         key = (self._image_mtime, scaled.width(), scaled.height())
         if key == self._light_mask_key:
+            return
+        cached = self._LIGHT_MASK_CACHE.get(key)
+        if cached is not None:
+            self._light_mask = cached
+            self._light_mask_key = key
             return
         # Never derive this mask from the selected finish: a blue/purple
         # shell would otherwise be mistaken for one enormous LED surface.
@@ -506,10 +544,15 @@ class GamepadWidget(QWidget):
                 if pixel.alpha() and pixel.blue() > 105 and blue_dominance > 28:
                     mask.setPixelColor(x, y, QColor(255, 255, 255, pixel.alpha()))
         self._light_mask = QPixmap.fromImage(mask)
+        self._remember(self._LIGHT_MASK_CACHE, key, self._light_mask, 24)
         self._light_mask_key = key
 
     def _lightbar_layer(self, scaled):
         self._ensure_light_mask(scaled)
+        key = (scaled.cacheKey(), self.light_rgb)
+        cached = self._LIGHTBAR_CACHE.get(key)
+        if cached is not None:
+            return cached
         layer = QPixmap(scaled.size())
         layer.fill(Qt.transparent)
         painter = QPainter(layer)
@@ -517,7 +560,7 @@ class GamepadWidget(QWidget):
         painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
         painter.drawPixmap(0, 0, self._light_mask)
         painter.end()
-        return layer
+        return self._remember(self._LIGHTBAR_CACHE, key, layer, 48)
 
     def _masked_feedback_layer(self, scaled):
         """Paint control highlights through the controller's alpha mask.
@@ -527,6 +570,13 @@ class GamepadWidget(QWidget):
         The mask keeps the light on the physical surface while retaining its
         soft falloff and the separate ambient silhouette glow behind it.
         """
+        feedback_key = tuple(sorted(
+            (int(code), round(float(strength), 3))
+            for code, strength in self.feedback.items() if strength > 0))
+        key = (scaled.cacheKey(), feedback_key)
+        cached = self._FEEDBACK_CACHE.get(key)
+        if cached is not None:
+            return cached
         layer = QPixmap(scaled.size())
         layer.fill(Qt.transparent)
         painter = QPainter(layer)
@@ -554,10 +604,14 @@ class GamepadWidget(QWidget):
         painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
         painter.drawPixmap(0, 0, scaled)
         painter.end()
-        return layer
+        return self._remember(self._FEEDBACK_CACHE, key, layer, 64)
 
     def _black_detail_layer(self, scaled):
         """Soft button lift for black plastic, without artificial outlines."""
+        key = scaled.cacheKey()
+        cached = self._BLACK_DETAIL_CACHE.get(key)
+        if cached is not None:
+            return cached
         layer = QPixmap(scaled.size())
         layer.fill(Qt.transparent)
         p = QPainter(layer)
@@ -633,10 +687,9 @@ class GamepadWidget(QWidget):
         p.setCompositionMode(QPainter.CompositionMode_DestinationIn)
         p.drawPixmap(0, 0, scaled)
         p.end()
-        return layer
+        return self._remember(self._BLACK_DETAIL_CACHE, key, layer, 24)
 
     def paintEvent(self, event):
-        self._reload_image()
         if self._image is not None:
             self._paint_image(self._finished_image())
         else:
@@ -651,7 +704,12 @@ class GamepadWidget(QWidget):
         # Oversizing the full canvas makes the visible controller fill the
         # hero area, as it does in the design reference.
         target_w, target_h = w * 1.30, h * 1.42
-        scaled = pixmap.scaled(int(target_w), int(target_h), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled_key = (pixmap.cacheKey(), int(target_w), int(target_h))
+        scaled = self._SCALED_CACHE.get(scaled_key)
+        if scaled is None:
+            scaled = pixmap.scaled(
+                int(target_w), int(target_h), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._remember(self._SCALED_CACHE, scaled_key, scaled, 32)
         x = (w - scaled.width()) / 2 + self._parallax.x()
         y = (h - scaled.height()) / 2 + self._parallax.y()
 
@@ -821,6 +879,7 @@ class ConnectionIndicator(QWidget):
         layout.addWidget(self.usb_label)
         layout.addWidget(self.bt_label)
         self.kind = None
+        self._styled = False
         self.set_connection(None)
 
     def _pill_style(self, active):
@@ -832,8 +891,11 @@ class ConnectionIndicator(QWidget):
         return (f"background: transparent; color: {pal['fg_dim']}; border: 1px solid {pal['border']}; "
                 "border-radius: 16px; padding: 7px 13px; font-size: 11px;")
 
-    def set_connection(self, kind):
+    def set_connection(self, kind, force=False):
+        if self._styled and kind == self.kind and not force:
+            return
         self.kind = kind
+        self._styled = True
         self.usb_label.setStyleSheet(self._pill_style(kind == "usb"))
         self.bt_label.setStyleSheet(self._pill_style(kind == "bluetooth"))
 
@@ -848,8 +910,13 @@ class BatteryGauge(QWidget):
 
     def set_text(self, text):
         match = re.search(r"(\d{1,3})\s*%", text)
-        self._value = max(0, min(100, int(match.group(1)))) if match else 0
-        self.update()
+        self.set_value(int(match.group(1)) if match else 0)
+
+    def set_value(self, value):
+        value = max(0, min(100, int(value))) if value is not None else 0
+        if value != self._value:
+            self._value = value
+            self.update()
 
     def paintEvent(self, event):
         pal = theme.manager.palette
@@ -2015,10 +2082,13 @@ class HomePage(QWidget):
             self.lightbar_rgb = OFF_GAMEPAD_LIGHT
             self.gamepad.set_light_color(self.lightbar_rgb)
 
-    def set_battery_text(self, text):
+    def set_battery_text(self, text, percent=None):
         self.battery_label.setText(text)
         self.hero_battery_label.setText(text)
-        self.battery_gauge.set_text(text)
+        if percent is None:
+            self.battery_gauge.set_text(text)
+        else:
+            self.battery_gauge.set_value(percent)
 
     def _poll_meter(self):
         engine = self.engine_holder()
@@ -2026,7 +2096,6 @@ class HomePage(QWidget):
         rgb = None
         fresh = False
         if engine is not None:
-            engine.visual_feedback_enabled = True
             snapshot = getattr(engine, 'visual_state', None)
             fresh = snapshot is not None and time.monotonic() - snapshot[0] < .5
             if fresh:
@@ -2395,17 +2464,25 @@ class PresetsPage(QWidget):
         self._refresh_connection()
 
 
-class ProfileCard(QFrame):
-    activated = Signal(str)
+def profile_metrics(params):
+    """Compact profile strengths derived from the profile's actual values."""
+    vibration = round(max(0.0, min(1.0, params.get("master_gain", 1.0) / 2.5)) * 100)
+    bass_hi = params.get("bass", {}).get("hi", 0.22)
+    treble_hi = params.get("treble", {}).get("hi", 0.045)
+    bass = round(max(0.0, min(1.0, (0.3 - bass_hi) / 0.29)) * 100)
+    treble = round(max(0.0, min(1.0, (0.3 - treble_hi) / 0.29)) * 100)
+    return {"vibration": vibration, "bass": bass, "treble": treble}
 
+
+class ProfileCard(QFrame):
     def __init__(self, name, params, active=False):
         super().__init__()
         self.name = name
         self.setObjectName("profileCard")
         self.setProperty("selected", False)
         self.setProperty("active", active)
-        self.setCursor(Qt.PointingHandCursor)
-        self._drag_start = None
+        # QListWidget owns selection and native InternalMove gestures.
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -2456,97 +2533,39 @@ class ProfileCard(QFrame):
 
     @staticmethod
     def _tags(params):
-        return [t("home_vibration"), t("label_bass"), t("label_treble")]
+        metrics = profile_metrics(params)
+        return [
+            f'{t("home_vibration")} {metrics["vibration"]}%',
+            f'{t("label_bass")} {metrics["bass"]}%',
+            f'{t("label_treble")} {metrics["treble"]}%',
+        ]
 
     def set_selected(self, selected):
         self.setProperty("selected", bool(selected))
         self.style().unpolish(self)
         self.style().polish(self)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_start = event.position().toPoint()
-            self.activated.emit(self.name)
-        super().mousePressEvent(event)
+class ProfileListWidget(QListWidget):
+    """Native Qt profile list; the view supplies drag/drop and its indicator."""
 
-    def mouseMoveEvent(self, event):
-        if (self._drag_start is None or not event.buttons() & Qt.LeftButton or
-                (event.position().toPoint() - self._drag_start).manhattanLength()
-                < QApplication.startDragDistance()):
-            super().mouseMoveEvent(event)
-            return
-        drag = QDrag(self)
-        mime = QMimeData()
-        mime.setData(ProfileDropArea.MIME_TYPE, self.name.encode("utf-8"))
-        drag.setMimeData(mime)
-        preview = self.grab()
-        drag.setPixmap(preview)
-        drag.setHotSpot(self._drag_start)
-        self.setProperty("dragging", True)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        drag.exec(Qt.MoveAction)
-        self.setProperty("dragging", False)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        self._drag_start = None
-
-    def mouseReleaseEvent(self, event):
-        self._drag_start = None
-        super().mouseReleaseEvent(event)
-
-
-class ProfileDropArea(QWidget):
-    """Drop surface for rearranging the visible profile cards."""
-
-    MIME_TYPE = "application/x-dualsense-profile"
-    profile_dropped = Signal(str, float)
+    order_changed = Signal(list)
 
     def __init__(self):
         super().__init__()
-        self.setAcceptDrops(True)
-        self._drop_target = None
-
-    def _cards(self):
-        layout = self.layout()
-        return [layout.itemAt(i).widget() for i in range(layout.count())
-                if isinstance(layout.itemAt(i).widget(), ProfileCard)] if layout else []
-
-    def _show_drop_target(self, y=None):
-        cards = self._cards()
-        target = None
-        if y is not None and cards:
-            target = next((card for card in cards if y < card.geometry().center().y()), cards[-1])
-        if target is self._drop_target:
-            return
-        for card in cards:
-            card.setProperty("dropTarget", card is target)
-            card.style().unpolish(card)
-            card.style().polish(card)
-        self._drop_target = target
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat(self.MIME_TYPE):
-            event.acceptProposedAction()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat(self.MIME_TYPE):
-            self._show_drop_target(event.position().y())
-            event.acceptProposedAction()
-
-    def dragLeaveEvent(self, event):
-        self._show_drop_target()
-        super().dragLeaveEvent(event)
+        self.setObjectName("profileList")
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setDropIndicatorShown(True)
+        self.setSpacing(9)
+        self.setMinimumHeight(360)
 
     def dropEvent(self, event):
-        if not event.mimeData().hasFormat(self.MIME_TYPE):
-            return
-        name = bytes(event.mimeData().data(self.MIME_TYPE)).decode("utf-8")
-        y = event.position().y()
-        self._show_drop_target()
-        self.profile_dropped.emit(name, y)
-        event.setDropAction(Qt.MoveAction)
-        event.accept()
+        before = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
+        super().dropEvent(event)
+        after = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
+        if after != before:
+            self.order_changed.emit(after)
 
 
 class ProfilesPage(QWidget):
@@ -2618,12 +2637,10 @@ class ProfilesPage(QWidget):
         self.count_label.setProperty("role", "hint")
         list_header.addWidget(self.count_label)
         list_layout.addLayout(list_header)
-        self.cards_widget = ProfileDropArea()
-        self.cards_widget.profile_dropped.connect(self._move_profile)
-        self.cards_layout = QVBoxLayout(self.cards_widget)
-        self.cards_layout.setContentsMargins(0, 0, 0, 0)
-        self.cards_layout.setSpacing(9)
-        list_layout.addWidget(self.cards_widget)
+        self.list = ProfileListWidget()
+        self.list.order_changed.connect(self._store_visible_order)
+        self.list.currentItemChanged.connect(self._on_list_selection_changed)
+        list_layout.addWidget(self.list)
         self.empty_label = QLabel(t("profiles_hint"))
         self.empty_label.setProperty("role", "emptyState")
         self.empty_label.setAlignment(Qt.AlignCenter)
@@ -2745,11 +2762,6 @@ class ProfilesPage(QWidget):
         outer.addWidget(create_card)
         outer.addStretch(1)
 
-        # Compatibility mirror for existing integrations that read the old
-        # QListWidget selection directly. The redesigned cards are the UI.
-        self.list = QListWidget(self)
-        self.list.hide()
-
         self.scroll.setWidget(content)
         page_layout.addWidget(self.scroll)
         self.connection_timer = QTimer(self)
@@ -2758,18 +2770,11 @@ class ProfilesPage(QWidget):
         self.refresh()
 
     def resizeEvent(self, event):
-        direction = (QBoxLayout.Direction.TopToBottom
-                     if event.size().width() < 900 else QBoxLayout.Direction.LeftToRight)
-        if self.workspace.direction() != direction:
-            self.workspace.setDirection(direction)
+        set_responsive_direction(event.size().width(), self.workspace)
         super().resizeEvent(event)
 
     def _clear_cards(self):
-        while self.cards_layout.count():
-            item = self.cards_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        self.list.clear()
         self.profile_cards.clear()
 
     def refresh(self):
@@ -2777,19 +2782,21 @@ class ProfilesPage(QWidget):
         active_ref = self.state["active_ref"]
         query = self.search_edit.text().strip().casefold()
         active_name = active_ref[len("profile:"):] if active_ref.startswith("profile:") else None
-        ordered_names = self._ordered_profile_names(active_name)
+        ordered_names = list(self.state["profiles"])
         names = [name for name in ordered_names
                  if not query or query in name.casefold()]
+        self.list.blockSignals(True)
         self._clear_cards()
-        self.list.clear()
         for name in names:
             active = active_ref == f"profile:{name}"
             card = ProfileCard(name, self.state["profiles"][name], active)
-            card.activated.connect(self._select_profile)
-            self.cards_layout.addWidget(card)
             self.profile_cards[name] = card
-            item = QListWidgetItem(name)
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, name)
+            item.setSizeHint(QSize(0, max(82, card.sizeHint().height())))
             self.list.addItem(item)
+            self.list.setItemWidget(item, card)
+        self.list.blockSignals(False)
         self.count_label.setText(str(len(names)))
         self.empty_label.setVisible(not names)
         if previous not in self.profile_cards:
@@ -2797,45 +2804,20 @@ class ProfilesPage(QWidget):
         self._select_profile(previous)
         self._refresh_connection()
 
-    def _ordered_profile_names(self, active_name=None):
-        """Return a complete, duplicate-free order and repair stale saved names."""
+    def _store_visible_order(self, visible_order):
+        """Merge a filtered view order back into the insertion-ordered dict."""
         profiles = self.state["profiles"]
-        configured = self.state.setdefault("profile_order", [])
-        ordered = []
-        for name in configured:
-            if name in profiles and name not in ordered:
-                ordered.append(name)
-        missing = sorted(
-            (name for name in profiles if name not in ordered),
-            key=lambda name: (name != active_name, name.casefold()))
-        ordered.extend(missing)
-        if configured != ordered:
-            self.state["profile_order"] = ordered
-        return ordered
-
-    def _move_profile(self, name, drop_y):
-        """Move within the visible subset, preserving filtered-out positions."""
-        visible = list(self.profile_cards)
-        if name not in visible or len(visible) < 2:
+        visible_set = set(visible_order)
+        replacements = iter(visible_order)
+        full_order = [next(replacements) if name in visible_set else name for name in profiles]
+        if full_order == list(profiles):
             return
-        without_dragged = [candidate for candidate in visible if candidate != name]
-        insert_at = len(without_dragged)
-        for index, candidate in enumerate(without_dragged):
-            if drop_y < self.profile_cards[candidate].geometry().center().y():
-                insert_at = index
-                break
-        reordered_visible = without_dragged[:insert_at] + [name] + without_dragged[insert_at:]
-        if reordered_visible == visible:
-            return
-
-        full_order = self._ordered_profile_names()
-        visible_set = set(visible)
-        replacement = iter(reordered_visible)
-        new_order = [next(replacement) if candidate in visible_set else candidate
-                     for candidate in full_order]
-        self.state["profile_order"] = new_order
-        self.selected_name = name
+        self.state["profiles"] = {name: profiles[name] for name in full_order}
+        self.selected_name = self.list.currentItem().data(Qt.UserRole) if self.list.currentItem() else None
         self.on_change()
+
+    def _on_list_selection_changed(self, current, previous):
+        self._select_profile(current.data(Qt.UserRole) if current is not None else None)
 
     def _refresh_connection(self):
         self.connection_indicator.set_connection(self.connection_getter())
@@ -2844,10 +2826,14 @@ class ProfilesPage(QWidget):
         self.selected_name = name if name in self.state["profiles"] else None
         for card_name, card in self.profile_cards.items():
             card.set_selected(card_name == self.selected_name)
+        self.list.blockSignals(True)
         for row in range(self.list.count()):
-            if self.list.item(row).text() == self.selected_name:
+            if self.list.item(row).data(Qt.UserRole) == self.selected_name:
                 self.list.setCurrentRow(row)
                 break
+        if self.selected_name is None:
+            self.list.setCurrentRow(-1)
+        self.list.blockSignals(False)
         self._refresh_details()
 
     def _refresh_details(self):
@@ -2860,12 +2846,7 @@ class ProfilesPage(QWidget):
         params = self.state["profiles"][name]
         self.detail_name.setText(name)
         self.detail_active.setVisible(self.state["active_ref"] == f"profile:{name}")
-        vibration = round(max(0.0, min(1.0, params.get("master_gain", 1.0) / 2.5)) * 100)
-        bass_hi = params.get("bass", {}).get("hi", 0.22)
-        treble_hi = params.get("treble", {}).get("hi", 0.045)
-        bass = round(max(0.0, min(1.0, (0.3 - bass_hi) / 0.29)) * 100)
-        treble = round(max(0.0, min(1.0, (0.3 - treble_hi) / 0.29)) * 100)
-        for key, value in (("vibration", vibration), ("bass", bass), ("treble", treble)):
+        for key, value in profile_metrics(params).items():
             bar, label = self.metric_bars[key]
             bar.setValue(value)
             label.setText(f"{value}%")
@@ -2886,14 +2867,16 @@ class ProfilesPage(QWidget):
             self, t("rename_profile_title"), t("rename_profile_label"), text=name)
         new_name = new_name.strip() if ok else ""
         if new_name and new_name != name:
-            order = self._ordered_profile_names()
-            self.state["profiles"][new_name] = self.state["profiles"].pop(name)
-            renamed_order = []
-            for item in order:
-                renamed = new_name if item == name else item
-                if renamed not in renamed_order:
-                    renamed_order.append(renamed)
-            self.state["profile_order"] = renamed_order
+            if new_name in self.state["profiles"]:
+                QMessageBox.warning(
+                    self, t("rename_profile_title"),
+                    t("profile_name_exists", name=new_name))
+                return
+            profiles = self.state["profiles"]
+            self.state["profiles"] = {
+                new_name if item == name else item: params
+                for item, params in profiles.items()
+            }
             if self.state["active_ref"] == f"profile:{name}":
                 self.state["active_ref"] = f"profile:{new_name}"
             self.selected_name = new_name
@@ -2908,8 +2891,6 @@ class ProfilesPage(QWidget):
                 self, t("delete_profile_title"),
                 t("delete_profile_confirm", name=name)) == QMessageBox.Yes:
             del self.state["profiles"][name]
-            self.state["profile_order"] = [item for item in self._ordered_profile_names()
-                                             if item != name]
             if self.state["active_ref"] == f"profile:{name}":
                 self.state["active_ref"] = "custom"
             self.selected_name = None
@@ -2920,10 +2901,12 @@ class ProfilesPage(QWidget):
         name = self.name_edit.text().strip()
         if not name:
             return
-        is_new = name not in self.state["profiles"]
+        if name in self.state["profiles"]:
+            QMessageBox.warning(
+                self, t("rename_profile_title"),
+                t("profile_name_exists", name=name))
+            return
         self.state["profiles"][name] = copy.deepcopy(self.state["active"])
-        if is_new:
-            self._ordered_profile_names()
         self.state["active_ref"] = f"profile:{name}"
         self.selected_name = name
         self.name_edit.clear()
@@ -3296,10 +3279,7 @@ class TriggersPage(QWidget):
         self._refresh_connection()
 
     def resizeEvent(self, event):
-        direction = (QBoxLayout.Direction.TopToBottom
-                     if event.size().width() < 900 else QBoxLayout.Direction.LeftToRight)
-        if self.columns_layout.direction() != direction:
-            self.columns_layout.setDirection(direction)
+        set_responsive_direction(event.size().width(), self.columns_layout)
         super().resizeEvent(event)
 
     def _refresh_connection(self):
@@ -3560,10 +3540,7 @@ class ButtonHapticPage(QWidget):
         self._poll_feedback()
 
     def resizeEvent(self, event):
-        direction = (QBoxLayout.Direction.TopToBottom
-                     if event.size().width() < 900 else QBoxLayout.Direction.LeftToRight)
-        if self.columns_layout.direction() != direction:
-            self.columns_layout.setDirection(direction)
+        set_responsive_direction(event.size().width(), self.columns_layout)
         super().resizeEvent(event)
 
     def _build_group(self, title, options):
@@ -3598,7 +3575,6 @@ class ButtonHapticPage(QWidget):
         held, feedback = {}, {}
         engine = self.engine_holder()
         if engine is not None:
-            engine.visual_feedback_enabled = True
             snapshot = getattr(engine, 'visual_state', None)
             if snapshot is not None and time.monotonic() - snapshot[0] < .5:
                 held = dict(snapshot[2])
@@ -3824,11 +3800,8 @@ class AdvancedPage(QWidget):
         self._poll_preview()
 
     def resizeEvent(self, event):
-        direction = (QBoxLayout.Direction.TopToBottom
-                     if event.size().width() < 900 else QBoxLayout.Direction.LeftToRight)
-        for layout in (self.summary_layout, self.bands_layout):
-            if layout.direction() != direction:
-                layout.setDirection(direction)
+        set_responsive_direction(
+            event.size().width(), self.summary_layout, self.bands_layout)
         super().resizeEvent(event)
 
     def _poll_preview(self):
@@ -3929,6 +3902,7 @@ class LedPage(QWidget):
         super().__init__()
         self.state = state
         self.on_change = on_change
+        self._slider_change_in_progress = False
         self.engine_holder = engine_holder or (lambda: None)
         self.connection_getter = connection_getter or (lambda: None)
         active = state["active"]
@@ -4165,15 +4139,28 @@ class LedPage(QWidget):
 
     def _set_led_attack(self, v):
         self._led_cfg().setdefault("immersive", {})["attack"] = v
+        self._persist_slider_change()
 
     def _set_led_release(self, v):
         self._led_cfg().setdefault("immersive", {})["release"] = v
+        self._persist_slider_change()
 
     def _set_led_gamma(self, v):
         self._led_cfg().setdefault("immersive", {})["gamma"] = v
+        self._persist_slider_change()
 
     def _set_led_bass_priority(self, v):
         self._led_cfg().setdefault("immersive", {})["bass_priority"] = v
+        self._persist_slider_change()
+
+    def _persist_slider_change(self):
+        """Save a drag without rebuilding the editor under the cursor."""
+        if self.on_change:
+            self._slider_change_in_progress = True
+            try:
+                self.on_change()
+            finally:
+                self._slider_change_in_progress = False
 
     def _set_selected_brightness(self, value):
         preset_id = self._led_cfg().get("preset", "immersive")
@@ -4328,6 +4315,7 @@ class LedPage(QWidget):
 
     def _set_preset_value(self, preset_id, key, value):
         self._led_cfg().setdefault(preset_id, {})[key] = value
+        self._persist_slider_change()
         self._poll_preview()
 
     def _set_preset_color(self, preset_id, key, rgb):
@@ -4378,7 +4366,8 @@ class LedPage(QWidget):
         self.led_release_slider.set_value(immersive.get("release", 0.08))
         self.led_gamma_slider.set_value(immersive.get("gamma", 1.8))
         self.led_bass_priority_slider.set_value(immersive.get("bass_priority", 0.6))
-        self._rebuild_preset_editor()
+        if not self._slider_change_in_progress:
+            self._rebuild_preset_editor()
         self.gamepad.set_skin(self.state.get('controller_skin', 'white'))
         self._poll_preview()
 
@@ -4951,10 +4940,7 @@ class AppAudioBindingPage(QWidget):
         self.refresh()
 
     def resizeEvent(self, event):
-        direction = (QBoxLayout.Direction.TopToBottom
-                     if event.size().width() < 900 else QBoxLayout.Direction.LeftToRight)
-        if self.workspace.direction() != direction:
-            self.workspace.setDirection(direction)
+        set_responsive_direction(event.size().width(), self.workspace)
         super().resizeEvent(event)
 
     def refresh(self):
@@ -5050,8 +5036,13 @@ class TitleBatteryIcon(QWidget):
 
     def set_text(self, text):
         match = re.search(r"(\d{1,3})\s*%", text)
-        self._value = max(0, min(100, int(match.group(1)))) if match else None
-        self.update()
+        self.set_value(int(match.group(1)) if match else None)
+
+    def set_value(self, value):
+        value = max(0, min(100, int(value))) if value is not None else None
+        if value != self._value:
+            self._value = value
+            self.update()
 
     def paintEvent(self, event):
         pal = theme.manager.palette
@@ -5080,7 +5071,6 @@ class WindowTitleBar(QFrame):
     def __init__(self, window):
         super().__init__(window)
         self.host_window = window
-        self._drag_offset = None
         self.setObjectName("windowTitleBar")
         self.setFixedHeight(62)
 
@@ -5179,11 +5169,13 @@ class WindowTitleBar(QFrame):
         self.device_pill.style().unpolish(self.device_pill)
         self.device_pill.style().polish(self.device_pill)
 
-    def set_battery(self, text):
-        match = re.search(r"(\d{1,3})\s*%", text)
-        self.battery_label.setText(f"{match.group(1)}%" if match else "—")
+    def set_battery(self, text, percent=None):
+        if percent is None:
+            match = re.search(r"(\d{1,3})\s*%", text)
+            percent = int(match.group(1)) if match else None
+        self.battery_label.setText(f"{percent}%" if percent is not None else "—")
         self.battery_label.setToolTip(text)
-        self.battery_icon.set_text(text)
+        self.battery_icon.set_value(percent)
 
     def set_compact(self, width):
         self.center_title.setVisible(width >= 1180)
@@ -5221,22 +5213,11 @@ class WindowTitleBar(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._drag_offset = event.globalPosition().toPoint() - self.host_window.frameGeometry().topLeft()
+            handle = self.host_window.windowHandle()
+            if handle is not None and handle.startSystemMove():
+                event.accept()
+                return
         super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
-            if self.host_window.isMaximized():
-                self.host_window.showNormal()
-                self._drag_offset = QPointF(self.host_window.width() / 2, 24).toPoint()
-            self.host_window.move(event.globalPosition().toPoint() - self._drag_offset)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        self._drag_offset = None
-        super().mouseReleaseEvent(event)
 
 
 class WindowResizeHandle(QWidget):
@@ -5268,6 +5249,7 @@ class MainWindow(QWidget):
         self.save_cb = save_cb
         self.enabled = True
         self._current_page_key = "home"
+        self._managed_page_timers = {}
         # Desktop-only per-app audio binding (see app_audio_binding.py) -
         # optional so this class stays constructible without the feature
         # wired in (e.g. in a future headless/test context).
@@ -5374,6 +5356,8 @@ class MainWindow(QWidget):
             self.title_bar.update_window_state()
             if hasattr(self, "_resize_handles"):
                 self._position_resize_handles()
+            if hasattr(self, "_managed_page_timers"):
+                QTimer.singleShot(0, self._update_page_activity)
         super().changeEvent(event)
 
     def _position_resize_handles(self):
@@ -5443,6 +5427,11 @@ class MainWindow(QWidget):
         }
         for page in self.pages.values():
             self.stack.addWidget(page)
+        self._managed_page_timers = {
+            key: [(timer, timer.interval()) for timer in page.findChildren(QTimer)
+                  if timer.isActive()]
+            for key, page in self.pages.items()
+        }
         self.home_page.set_enabled_text(self.enabled)
 
     def _retranslate_sidebar(self):
@@ -5475,9 +5464,12 @@ class MainWindow(QWidget):
         self.home_page.set_status_text(text)
         self.title_bar.set_status(text, connected)
 
-    def set_battery_text(self, text):
-        self.home_page.set_battery_text(text)
-        self.title_bar.set_battery(text)
+    def set_battery_text(self, text, percent=None):
+        if percent is None:
+            match = re.search(r"(\d{1,3})\s*%", text)
+            percent = int(match.group(1)) if match else None
+        self.home_page.set_battery_text(text, percent)
+        self.title_bar.set_battery(text, percent)
 
     def _quick_trigger(self, preset_id, side):
         if preset_id is None:
@@ -5498,6 +5490,40 @@ class MainWindow(QWidget):
         self.nav_buttons[key].setChecked(True)
         for btn in self.nav_buttons.values():
             settle_icon_size(btn)
+        self._update_page_activity()
+
+    def _update_page_activity(self):
+        """Run only the timers belonging to the visible page.
+
+        Qt timers continue firing for widgets hidden in a QStackedWidget, so
+        relying on widget visibility alone wastes CPU and also kept engine
+        telemetry enabled after the visual pages were left.
+        """
+        window_active = self.isVisible() and not self.isMinimized()
+        for key, timers in self._managed_page_timers.items():
+            active = window_active and key == self._current_page_key
+            for timer, interval in timers:
+                if active and not timer.isActive():
+                    timer.start(interval)
+                elif not active and timer.isActive():
+                    timer.stop()
+        engine = self.engine_holder()
+        if engine is not None:
+            engine.visual_feedback_enabled = bool(
+                window_active and self._current_page_key in {"home", "button_haptic", "led"})
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_page_activity()
+
+    def hideEvent(self, event):
+        for timers in self._managed_page_timers.values():
+            for timer, _interval in timers:
+                timer.stop()
+        engine = self.engine_holder()
+        if engine is not None:
+            engine.visual_feedback_enabled = False
+        super().hideEvent(event)
 
     def _apply_params(self, new_params, ref):
         active = self.state["active"]
@@ -5667,14 +5693,17 @@ class MainWindow(QWidget):
         self._apply_sidebar_toggle_icon()
         for key, _label_key, icon_char in NAV_ITEMS:
             self.nav_buttons[key].setIcon(render_emoji_icon(icon_char))
-        self.home_page.connection_indicator.set_connection(
-            self.home_page.connection_indicator.kind)
+        for indicator in self.findChildren(ConnectionIndicator):
+            indicator.set_connection(indicator.kind, force=True)
         self.home_page.gamepad.update()
         if hasattr(self, "on_theme_applied"):
             self.on_theme_applied()
 
     def _on_language_changed(self):
         key = self._current_page_key
+        for timers in self._managed_page_timers.values():
+            for timer, _interval in timers:
+                timer.stop()
         while self.stack.count():
             w = self.stack.widget(0)
             self.stack.removeWidget(w)
@@ -5790,7 +5819,7 @@ class TrayApp:
         self.battery_action.setText(battery_text)
         self.main_window.set_status_text(
             status_text, not self._disabled and self._status_kind in ("connected", "proxied"))
-        self.main_window.set_battery_text(battery_text)
+        self.main_window.set_battery_text(battery_text, self._battery_percent)
         self.toggle_action.setText(t("tray_disable_vibration") if not self._disabled else t("tray_enable_vibration"))
         self.open_action.setText(t("tray_open"))
         self.quit_action.setText(t("tray_quit"))
@@ -5859,10 +5888,11 @@ class TrayApp:
         self._battery_raw_status = status
         if percent is None:
             self.battery_action.setText(t("tray_battery_missing"))
-            self.main_window.set_battery_text(t("battery_unknown"))
+            self.main_window.set_battery_text(t("battery_unknown"), None)
             return
         self.battery_action.setText(self._battery_display_text())
-        self.main_window.set_battery_text(f"{percent}% · {self._battery_status_localized()}")
+        self.main_window.set_battery_text(
+            f"{percent}% · {self._battery_status_localized()}", percent)
 
     def _quit(self):
         self.stop_engine_cb()
