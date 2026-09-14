@@ -1267,8 +1267,12 @@ class ReactiveControllerOutline(GamepadWidget):
     """Real controller render with independent surface pulses per motor."""
 
     MOTOR_ANCHORS = {
-        'bass': ((.285, .675), (.715, .675)),
-        'treble': ((.265, .355), (.735, .355)),
+        # The telemetry contains the two physical output channels, not four
+        # mirrored bands: strong/bass is the left motor and weak/treble is
+        # the right motor. Keeping one anchor per channel makes the picture
+        # identify the motor that is actually moving.
+        'bass': ((.285, .675),),
+        'treble': ((.715, .675),),
     }
 
     def __init__(self):
@@ -1297,7 +1301,9 @@ class ReactiveControllerOutline(GamepadWidget):
             (self.weak, self.MOTOR_ANCHORS['treble'], QColor('#18b8ff'), .056),
         )
         for level, anchors, color, base_radius in specs:
-            energy = max(.025, level * pulse)
+            energy = level * pulse
+            if energy <= .005:
+                continue
             radius = scaled.width() * (base_radius + energy * .030)
             for anchor_x, anchor_y in anchors:
                 center = QPointF(scaled.width() * anchor_x, scaled.height() * anchor_y)
@@ -1325,13 +1331,18 @@ class ReactiveControllerOutline(GamepadWidget):
         x = (w - scaled.width()) / 2 + self._parallax.x()
         y = (h - scaled.height()) / 2 - h * .025 + self._parallax.y()
 
-        # A low purple reflection supports the two bass indicators in the
-        # grips. Treble stays visually above it on the controller surface.
+        # Each reflection follows its own motor as well. At zero there is
+        # no coloured residue that could look like activity on another side.
         floor_y = h * .86
-        for cx in (w * .40, w * .60):
-            level, color = self.strong, QColor('#8655ff')
+        floor_specs = (
+            (self.strong, w * .40, QColor('#8655ff')),
+            (self.weak, w * .60, QColor('#18b8ff')),
+        )
+        for level, cx, color in floor_specs:
+            if level <= .005:
+                continue
             floor = QRadialGradient(QPointF(cx, floor_y), w * .28)
-            alpha = 25 + int(level * 90)
+            alpha = 12 + int(level * 103)
             floor.setColorAt(0, QColor(color.red(), color.green(), color.blue(), alpha))
             floor.setColorAt(1, QColor(color.red(), color.green(), color.blue(), 0))
             p.setPen(Qt.NoPen)
@@ -1341,7 +1352,9 @@ class ReactiveControllerOutline(GamepadWidget):
         self._ensure_glow_layers(scaled)
         if self._glow_layers:
             padding, layer = self._glow_layers[-1]
-            p.setOpacity(.07 + self.level * .10)
+            # A quiet, constant silhouette gives the controller depth; live
+            # energy is deliberately confined to the matching motor zones.
+            p.setOpacity(.07)
             p.drawPixmap(int(x - padding), int(y - padding), layer)
         p.setOpacity(1.0)
         p.drawPixmap(int(x), int(y), scaled)
@@ -2720,23 +2733,29 @@ class ProfilesPage(QWidget):
         divider.setFrameShape(QFrame.HLine)
         body.addWidget(divider)
         self.metric_bars = {}
-        for key, label in (
+        self.metric_grid = QGridLayout()
+        self.metric_grid.setContentsMargins(0, 0, 0, 0)
+        self.metric_grid.setHorizontalSpacing(12)
+        self.metric_grid.setVerticalSpacing(8)
+        for row_index, (key, label) in enumerate((
             ("vibration", t("home_vibration")),
             ("bass", t("label_bass")),
             ("treble", t("label_treble")),
-        ):
-            row = QHBoxLayout()
-            row.addWidget(QLabel(label))
+        )):
+            metric_label = QLabel(label)
+            self.metric_grid.addWidget(metric_label, row_index, 0)
             bar = QProgressBar()
             bar.setRange(0, 100)
             bar.setTextVisible(False)
-            row.addWidget(bar, 1)
+            self.metric_grid.addWidget(bar, row_index, 1)
             value = QLabel()
             value.setProperty("role", "value")
             value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            row.addWidget(value)
-            body.addLayout(row)
+            value.setMinimumWidth(38)
+            self.metric_grid.addWidget(value, row_index, 2)
             self.metric_bars[key] = (bar, value)
+        self.metric_grid.setColumnStretch(1, 1)
+        body.addLayout(self.metric_grid)
 
         body.addStretch(1)
         self.apply_btn = QPushButton("▶  " + t("btn_apply"))

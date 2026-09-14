@@ -723,21 +723,42 @@ def test_vibration_motor_pulses_stay_on_real_controller_surface(dashboard):
     assert isinstance(controller, GamepadWidget)
     bass = controller.MOTOR_ANCHORS['bass']
     treble = controller.MOTOR_ANCHORS['treble']
-    assert len(bass) == len(treble) == 2
-    assert bass[0][0] < .5 < bass[1][0]
-    assert treble[0][0] < .5 < treble[1][0]
-    assert all(bass_y > treble_y for (_, bass_y), (_, treble_y) in zip(bass, treble))
-    assert bass[0][0] + bass[1][0] == pytest.approx(1)
-    assert treble[0][0] + treble[1][0] == pytest.approx(1)
-    controller.set_levels(.8, .6)
+    assert len(bass) == len(treble) == 1
+    assert bass[0][0] < .5 < treble[0][0]
+    assert bass[0][1] == pytest.approx(treble[0][1])
     source = controller._finished_image().scaled(306, 204, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    layer = controller._motor_surface_layer(source).toImage()
     mask = source.toImage()
-    assert any(layer.pixelColor(x, y).alpha() > 0
-               for y in range(layer.height()) for x in range(layer.width()))
-    assert all(layer.pixelColor(x, y).alpha() == 0
-               for y in range(layer.height()) for x in range(layer.width())
-               if mask.pixelColor(x, y).alpha() == 0)
+    points = {
+        key: (round(source.width() * anchors[0][0]), round(source.height() * anchors[0][1]))
+        for key, anchors in controller.MOTOR_ANCHORS.items()
+    }
+    for levels, active, inactive in (((.8, 0), 'bass', 'treble'), ((0, .6), 'treble', 'bass')):
+        controller.set_levels(*levels)
+        layer = controller._motor_surface_layer(source).toImage()
+        assert layer.pixelColor(*points[active]).alpha() > 0
+        assert layer.pixelColor(*points[inactive]).alpha() == 0
+        assert all(layer.pixelColor(x, y).alpha() == 0
+                   for y in range(layer.height()) for x in range(layer.width())
+                   if mask.pixelColor(x, y).alpha() == 0)
+
+
+def test_profile_detail_metric_bars_share_one_start_column(dashboard):
+    from PySide6.QtCore import QPoint
+
+    window, engine, app = dashboard
+    page = window.profiles_page
+    window.state['profiles']['alignment'] = copy.deepcopy(window.state['active'])
+    page.refresh()
+    page._select_profile('alignment')
+    window.show()
+    window.show_page('profiles')
+    app.processEvents()
+
+    starts = {
+        bar.mapTo(page.details_body, QPoint(0, 0)).x()
+        for bar, _value in page.metric_bars.values()
+    }
+    assert len(starts) == 1
 
 
 def test_button_page_glows_live_pressed_controls_and_clears_stale_state(dashboard):
