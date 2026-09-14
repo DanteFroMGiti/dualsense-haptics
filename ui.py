@@ -1267,12 +1267,25 @@ class ReactiveControllerOutline(GamepadWidget):
     """Real controller render with independent surface pulses per motor."""
 
     MOTOR_ANCHORS = {
-        # The telemetry contains the two physical output channels, not four
-        # mirrored bands: strong/bass is the left motor and weak/treble is
-        # the right motor. Keeping one anchor per channel makes the picture
-        # identify the motor that is actually moving.
-        'bass': ((.285, .675),),
-        'treble': ((.715, .675),),
+        # Each physical motor owns both visual zones on its side. The upper
+        # point is cyan and the lower point purple, while their shared level
+        # still comes from the real left/right output channel.
+        'left': {
+            'upper': (.265, .355),
+            'lower': (.285, .675),
+        },
+        'right': {
+            'upper': (.735, .355),
+            'lower': (.715, .675),
+        },
+    }
+    MOTOR_COLORS = {
+        'upper': QColor('#18b8ff'),
+        'lower': QColor('#955cff'),
+    }
+    MOTOR_RADII = {
+        'upper': .056,
+        'lower': .068,
     }
 
     def __init__(self):
@@ -1296,16 +1309,17 @@ class ReactiveControllerOutline(GamepadWidget):
         p = QPainter(layer)
         p.setRenderHint(QPainter.Antialiasing)
         pulse = .90 + .10 * math.sin(self.phase * 1.8)
-        specs = (
-            (self.strong, self.MOTOR_ANCHORS['bass'], QColor('#955cff'), .068),
-            (self.weak, self.MOTOR_ANCHORS['treble'], QColor('#18b8ff'), .056),
+        motors = (
+            (self.strong, self.MOTOR_ANCHORS['left']),
+            (self.weak, self.MOTOR_ANCHORS['right']),
         )
-        for level, anchors, color, base_radius in specs:
+        for level, zones in motors:
             energy = level * pulse
             if energy <= .005:
                 continue
-            radius = scaled.width() * (base_radius + energy * .030)
-            for anchor_x, anchor_y in anchors:
+            for zone, (anchor_x, anchor_y) in zones.items():
+                color = self.MOTOR_COLORS[zone]
+                radius = scaled.width() * (self.MOTOR_RADII[zone] + energy * .030)
                 center = QPointF(scaled.width() * anchor_x, scaled.height() * anchor_y)
                 glow = QRadialGradient(center, radius * 1.85)
                 glow.setColorAt(0, QColor(color.red(), color.green(), color.blue(), 45 + int(energy * 190)))
@@ -1336,7 +1350,7 @@ class ReactiveControllerOutline(GamepadWidget):
         floor_y = h * .86
         floor_specs = (
             (self.strong, w * .40, QColor('#8655ff')),
-            (self.weak, w * .60, QColor('#18b8ff')),
+            (self.weak, w * .60, QColor('#8655ff')),
         )
         for level, cx, color in floor_specs:
             if level <= .005:

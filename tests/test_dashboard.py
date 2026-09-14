@@ -721,25 +721,33 @@ def test_vibration_motor_pulses_stay_on_real_controller_surface(dashboard):
     window, engine, app = dashboard
     controller = window.advanced_page.controller_outline
     assert isinstance(controller, GamepadWidget)
-    bass = controller.MOTOR_ANCHORS['bass']
-    treble = controller.MOTOR_ANCHORS['treble']
-    assert len(bass) == len(treble) == 1
-    assert bass[0][0] < .5 < treble[0][0]
-    assert bass[0][1] == pytest.approx(treble[0][1])
+    left = controller.MOTOR_ANCHORS['left']
+    right = controller.MOTOR_ANCHORS['right']
+    assert set(left) == set(right) == {'upper', 'lower'}
+    assert all(point[0] < .5 for point in left.values())
+    assert all(point[0] > .5 for point in right.values())
+    assert left['upper'][1] < left['lower'][1]
+    assert right['upper'][1] < right['lower'][1]
     source = controller._finished_image().scaled(306, 204, Qt.KeepAspectRatio, Qt.SmoothTransformation)
     mask = source.toImage()
     points = {
-        key: (round(source.width() * anchors[0][0]), round(source.height() * anchors[0][1]))
-        for key, anchors in controller.MOTOR_ANCHORS.items()
+        side: {
+            zone: (round(source.width() * point[0]), round(source.height() * point[1]))
+            for zone, point in zones.items()
+        }
+        for side, zones in controller.MOTOR_ANCHORS.items()
     }
-    for levels, active, inactive in (((.8, 0), 'bass', 'treble'), ((0, .6), 'treble', 'bass')):
+    for levels, active, inactive in (((.8, 0), 'left', 'right'), ((0, .6), 'right', 'left')):
         controller.set_levels(*levels)
         layer = controller._motor_surface_layer(source).toImage()
-        assert layer.pixelColor(*points[active]).alpha() > 0
-        assert layer.pixelColor(*points[inactive]).alpha() == 0
+        assert all(layer.pixelColor(*point).alpha() > 0 for point in points[active].values())
+        assert all(layer.pixelColor(*point).alpha() == 0 for point in points[inactive].values())
         assert all(layer.pixelColor(x, y).alpha() == 0
                    for y in range(layer.height()) for x in range(layer.width())
                    if mask.pixelColor(x, y).alpha() == 0)
+
+    assert controller.MOTOR_COLORS['upper'].name() == '#18b8ff'
+    assert controller.MOTOR_COLORS['lower'].name() == '#955cff'
 
 
 def test_profile_detail_metric_bars_share_one_start_column(dashboard):
